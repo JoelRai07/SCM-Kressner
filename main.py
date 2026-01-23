@@ -172,6 +172,12 @@ model.unplug_ok = pyo.Param(model.Z, initialize=unplug_ok_init)
  
 # --- LKW-Typ-Zuordnung ---
 model.type_assignment = pyo.Var(model.K, model.T, domain=pyo.Binary)
+
+# LKW wird benutzt (mindestens eine Tour)
+model.truck_used = pyo.Var(model.K, domain=pyo.Binary)
+
+# Hilfsvariable für Linearisierung: truck_type_used[k,t] = truck_used[k] * type_assignment[k,t]
+model.truck_type_used = pyo.Var(model.K, model.T, domain=pyo.Binary)
  
 # --- Hilfsvariable für Linearisierung: a_type[r,k,t] = a[r,k] * type_assignment[k,t] ---
 model.a_type = pyo.Var(model.R, model.K, model.T, domain=pyo.Binary)
@@ -229,7 +235,31 @@ model.con_a_type_lin3 = pyo.Constraint(model.R, model.K, model.T, rule=a_type_li
 def one_type_per_truck_rule(model, k):
     return sum(model.type_assignment[k, t] for t in model.T) == 1
 model.con_one_type_per_truck = pyo.Constraint(model.K, rule=one_type_per_truck_rule)
- 
+
+# --- 5.0b TRUCK_USED LOGIK ---
+
+def truck_used_lower_rule(model, k):
+    return sum(model.a[r, k] for r in model.R) <= len(model.R) * model.truck_used[k]
+model.con_truck_used_lower = pyo.Constraint(model.K, rule=truck_used_lower_rule)
+
+def truck_used_upper_rule(model, k):
+    return model.truck_used[k] <= sum(model.a[r, k] for r in model.R)
+model.con_truck_used_upper = pyo.Constraint(model.K, rule=truck_used_upper_rule)
+
+# --- LINEARISIERUNG: truck_type_used[k,t] = truck_used[k] * type_assignment[k,t] ---
+
+def ttu_lin1_rule(model, k, t):
+    return model.truck_type_used[k, t] <= model.truck_used[k]
+model.con_ttu_lin1 = pyo.Constraint(model.K, model.T, rule=ttu_lin1_rule)
+
+def ttu_lin2_rule(model, k, t):
+    return model.truck_type_used[k, t] <= model.type_assignment[k, t]
+model.con_ttu_lin2 = pyo.Constraint(model.K, model.T, rule=ttu_lin2_rule)
+
+def ttu_lin3_rule(model, k, t):
+    return model.truck_type_used[k, t] >= model.truck_used[k] + model.type_assignment[k, t] - 1
+model.con_ttu_lin3 = pyo.Constraint(model.K, model.T, rule=ttu_lin3_rule)
+
 # --- 5.1 TOUR-ZUORDNUNG ---
  
 def tour_assignment_rule(model, r):
@@ -394,43 +424,36 @@ model.con_storage_discharge_mode_binary = pyo.Constraint(model.Z, rule=storage_d
 # ============================================================================
  
 def objective_rule(model):
-    # C_trucks: LKW-Fixkosten (linear)
+    # C_trucks: NUR für benutzte LKWs
     C_trucks = sum(
-        sum(model.type_assignment[k, t] * (model.cap_d[t] + model.opx_d[t] + model.kfz_d[t]) for t in model.TD) +
-        sum(model.type_assignment[k, t] * (model.cap_e[t] + model.opx_e[t]) for t in model.TE)
+        sum(model.truck_type_used[k, t] * (model.cap_d[t] + model.opx_d[t] + model.kfz_d[t]) for t in model.TD) +
+        sum(model.truck_type_used[k, t] * (model.cap_e[t] + model.opx_e[t]) for t in model.TE)
         for k in model.K
     )
-   
-    # C_chargers
+    
     C_chargers = sum(model.y_l[l] * (model.cap_l[l] + model.opx_l[l]) for l in model.L)
-   
-    # C_grid_trafo
+    
     C_grid_trafo = 10000 * model.u
-   
-    # C_storage
+    
     C_storage = (1 + model.opx_s) * (model.capP_s * model.p_s + model.capQ_s * model.q_s)
-   
-    # C_diesel_var: LINEARISIERT mit a_type (nur für TD)
+    
     C_diesel_var = 260 * sum(
         model.a_type[r, k, t] * (model.c_m_d * model.mDist[r] +
                                   model.c_diesel * (model.dist[r]/100) * model.avgDv_d[t])
         for r in model.R for k in model.K for t in model.TD
     )
-   
-    # C_electricity
+    
     C_electricity = model.c_gr + model.cPeak * model.p_peak + \
                     260 * model.c_e * sum(model.p_grid[z] * model.delta_t for z in model.Z)
-   
-    # C_revenue
+    
     C_revenue = sum(
-        sum(model.type_assignment[k, t] * model.thg_e[t] for t in model.TE)
+        sum(model.truck_type_used[k, t] * model.thg_e[t] for t in model.TE)
         for k in model.K
     )
-   
+    
     return C_trucks + C_chargers + C_grid_trafo + C_storage + C_diesel_var + C_electricity - C_revenue
- 
+
 model.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
- 
 # ============================================================================
 # SOLVER INSTALLATION UND SETUP
 # ============================================================================
