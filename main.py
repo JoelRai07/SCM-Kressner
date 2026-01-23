@@ -1,11 +1,12 @@
 # ============================================================================
 # MILP-OPTIMIERUNGSMODELL FÜR LKW-FLOTTENPLANUNG MIT LADEINFRASTRUKTUR
 # Pyomo ConcreteModel - Google Colab Ready
-# MIT OPTIMIERUNG DER LKW-TYPEN
+# MIT OPTIMIERUNG DER LKW-TYPEN - VOLLSTÄNDIG LINEARISIERT
 # ============================================================================
  
 # Installation und Import
 !pip install pyomo -q
+!apt-get install -y -qq glpk-utils
  
 import pyomo.environ as pyo
 from pyomo.opt import SolverFactory
@@ -28,7 +29,7 @@ model.R = pyo.Set(initialize=[
 ])
  
 # LKWs - ERHÖHT AUF 15
-model.K = pyo.Set(initialize=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+model.K = pyo.Set(initialize=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
  
 # Diesel-LKW-Typen
 model.TD = pyo.Set(initialize=['ActrosL'])
@@ -57,7 +58,6 @@ model.Z_night = pyo.Set(initialize=[z for z in range(1, 97) if z not in range(25
  
 # --- Tourenparameter ---
  
-# Distanz (km)
 dist_data = {
     't-4': 250, 't-5': 250, 't-6': 250,
     's-1': 120, 's-2': 120, 's-3': 120, 's-4': 120,
@@ -66,7 +66,6 @@ dist_data = {
 }
 model.dist = pyo.Param(model.R, initialize=dist_data)
  
-# Mautpflichtige Distanz (km)
 mDist_data = {
     't-4': 150, 't-5': 150, 't-6': 150,
     's-1': 32, 's-2': 32, 's-3': 32, 's-4': 32,
@@ -75,7 +74,6 @@ mDist_data = {
 }
 model.mDist = pyo.Param(model.R, initialize=mDist_data)
  
-# Startintervall s_r(r)
 s_r_data = {
     't-4': 28, 't-5': 27, 't-6': 25,
     's-1': 23, 's-2': 25, 's-3': 37, 's-4': 27,
@@ -84,7 +82,6 @@ s_r_data = {
 }
 model.s_r = pyo.Param(model.R, initialize=s_r_data)
  
-# Endintervall e_r(r)
 e_r_data = {
     't-4': 69, 't-5': 70, 't-6': 67,
     's-1': 63, 's-2': 65, 's-3': 65, 's-4': 67,
@@ -93,22 +90,18 @@ e_r_data = {
 }
 model.e_r = pyo.Param(model.R, initialize=e_r_data)
  
-# Dauer der Tour in Intervallen
 def dur_z_init(model, r):
     return model.e_r[r] - model.s_r[r]
 model.dur_z = pyo.Param(model.R, initialize=dur_z_init)
  
-# start_at[r,z]: 1 wenn Tour r in Intervall z startet
 def start_at_init(model, r, z):
     return 1 if z == model.s_r[r] else 0
 model.start_at = pyo.Param(model.R, model.Z, initialize=start_at_init)
  
-# end_at[r,z]: 1 wenn Tour r in Intervall z endet
 def end_at_init(model, r, z):
     return 1 if z == model.e_r[r] else 0
 model.end_at = pyo.Param(model.R, model.Z, initialize=end_at_init)
  
-# active_tour[r,z]: 1 wenn Tour r in Intervall z aktiv ist
 def active_tour_init(model, r, z):
     return 1 if model.s_r[r] <= z < model.e_r[r] else 0
 model.active_tour = pyo.Param(model.R, model.Z, initialize=active_tour_init)
@@ -130,9 +123,8 @@ model.avgEv_e = pyo.Param(model.TE, initialize={'eActros600': 1.1, 'eActros400':
 model.soc_e = pyo.Param(model.TE, initialize={'eActros600': 621, 'eActros400': 414})
 model.thg_e = pyo.Param(model.TE, initialize={'eActros600': 1000, 'eActros400': 1000})
  
-# Maximale Ladeleistung (inkl. Diesel = 0)
 max_p_e_data = {'eActros600': 400, 'eActros400': 400, 'ActrosL': 0}
-model.max_p_e = pyo.Param(model.TD | model.TE, initialize=max_p_e_data)
+model.max_p_e = pyo.Param(model.T, initialize=max_p_e_data)
  
 # --- Ladesäulen-Parameter ---
  
@@ -165,8 +157,6 @@ model.delta_t = pyo.Param(initialize=0.25)
 model.M = pyo.Param(initialize=10000)
 model.z6 = pyo.Param(initialize=25)
  
-# --- Abgeleiteter Parameter: unplug_ok ---
- 
 def unplug_ok_init(model, z):
     if z in model.Z_day:
         return 1
@@ -174,42 +164,33 @@ def unplug_ok_init(model, z):
         return 1
     else:
         return 0
-model.unplug_ok = pyo.Param(model.Z, initialize=unplug_ok_init, within=pyo.Binary)
+model.unplug_ok = pyo.Param(model.Z, initialize=unplug_ok_init)
  
 # ============================================================================
-# 3️⃣ ENTSCHEIDUNGSVARIABLEN (ERWEITERT)
+# 3️⃣ ENTSCHEIDUNGSVARIABLEN
 # ============================================================================
  
-# --- LKW-Typ-Zuordnung (NEU: Jetzt eine Variable!) ---
- 
-# type_assignment[k,t] = 1 wenn LKW k vom Typ t ist
+# --- LKW-Typ-Zuordnung ---
 model.type_assignment = pyo.Var(model.K, model.T, domain=pyo.Binary)
  
-# --- Zuordnung & Bewegung ---
+# --- Hilfsvariable für Linearisierung: a_type[r,k,t] = a[r,k] * type_assignment[k,t] ---
+model.a_type = pyo.Var(model.R, model.K, model.T, domain=pyo.Binary)
  
+# --- Zuordnung & Bewegung ---
 model.a = pyo.Var(model.R, model.K, domain=pyo.Binary)
 model.depart = pyo.Var(model.K, model.Z, domain=pyo.Binary)
 model.arrive = pyo.Var(model.K, model.Z, domain=pyo.Binary)
-model.has_future = pyo.Var(model.K, model.Z_night, domain=pyo.Binary)
-model.next = pyo.Var(model.R, model.K, model.Z_night, domain=pyo.Binary)
  
 # --- Laden ---
- 
 model.assign = pyo.Var(model.K, model.L, model.Z, domain=pyo.Binary)
 model.plug = pyo.Var(model.K, model.L, model.Z, domain=pyo.Binary)
 model.real_p = pyo.Var(model.K, model.L, model.Z, domain=pyo.NonNegativeReals)
 model.y_l = pyo.Var(model.L, domain=pyo.NonNegativeIntegers, bounds=(0, model.Nmax))
  
 # --- Energiezustände ---
- 
-# soc für ALLE LKWs (wird 0 sein für Diesel)
 model.soc = pyo.Var(model.K, model.Z, domain=pyo.NonNegativeReals)
  
-model.need_charge = pyo.Var(model.K, model.Z_night, domain=pyo.Binary)
-model.enough = pyo.Var(model.K, model.Z_night, domain=pyo.Binary)
- 
 # --- Speicherbetrieb ---
- 
 model.p_s = pyo.Var(domain=pyo.NonNegativeReals)
 model.q_s = pyo.Var(domain=pyo.NonNegativeReals)
 model.p_l_s = pyo.Var(model.Z, domain=pyo.NonNegativeReals)
@@ -218,159 +199,76 @@ model.soc_s = pyo.Var(model.Z, domain=pyo.NonNegativeReals)
 model.mode_s = pyo.Var(model.Z, domain=pyo.Binary)
  
 # --- Netz ---
- 
 model.p_grid = pyo.Var(model.Z, domain=pyo.NonNegativeReals)
 model.p_peak = pyo.Var(domain=pyo.NonNegativeReals)
 model.u = pyo.Var(domain=pyo.Binary)
  
 # ============================================================================
-# 4️⃣ BERECHNETE VARIABLEN / EXPRESSIONS (ANGEPASST)
+# 4️⃣ LINEARISIERUNG: a_type[r,k,t] = a[r,k] * type_assignment[k,t]
 # ============================================================================
  
-# --- Energieverbrauch cons[k,z] ---
+# Für ALLE Typen (TD und TE)
+def a_type_lin1_rule(model, r, k, t):
+    return model.a_type[r, k, t] <= model.a[r, k]
+model.con_a_type_lin1 = pyo.Constraint(model.R, model.K, model.T, rule=a_type_lin1_rule)
  
-def cons_init(model, k, z):
-    # Verbrauch = Summe über alle Elektro-Typen
-    return sum(
-        model.type_assignment[k, t] * sum(
-            model.active_tour[r, z] * model.a[r, k] *
-            (model.dist[r] * model.avgEv_e[t] / model.dur_z[r])
-            for r in model.R
-        )
-        for t in model.TE
-    )
+def a_type_lin2_rule(model, r, k, t):
+    return model.a_type[r, k, t] <= model.type_assignment[k, t]
+model.con_a_type_lin2 = pyo.Constraint(model.R, model.K, model.T, rule=a_type_lin2_rule)
  
-model.cons = pyo.Expression(model.K, model.Z, rule=cons_init)
- 
-# --- Energiebedarf e_next[k,z] ---
- 
-def e_next_init(model, k, z):
-    rAfter_z = [r for r in model.R if model.s_r[r] > z]
-    return sum(
-        model.type_assignment[k, t] * sum(
-            model.next[r, k, z] * model.dist[r] * model.avgEv_e[t]
-            for r in rAfter_z
-        )
-        for t in model.TE
-    )
- 
-model.e_next = pyo.Expression(model.K, model.Z_night, rule=e_next_init)
+def a_type_lin3_rule(model, r, k, t):
+    return model.a_type[r, k, t] >= model.a[r, k] + model.type_assignment[k, t] - 1
+model.con_a_type_lin3 = pyo.Constraint(model.R, model.K, model.T, rule=a_type_lin3_rule)
  
 # ============================================================================
-# 5️⃣ NEBENBEDINGUNGEN (CONSTRAINTS)
+# 5️⃣ NEBENBEDINGUNGEN
 # ============================================================================
  
-# --- 5.0 LKW-TYP-ZUORDNUNG (NEU!) ---
+# --- 5.0 LKW-TYP-ZUORDNUNG ---
  
-# (NB0a) Jeder LKW muss genau einen Typ haben
 def one_type_per_truck_rule(model, k):
     return sum(model.type_assignment[k, t] for t in model.T) == 1
 model.con_one_type_per_truck = pyo.Constraint(model.K, rule=one_type_per_truck_rule)
  
 # --- 5.1 TOUR-ZUORDNUNG ---
  
-# (NB1) Jede Tour genau einem LKW
 def tour_assignment_rule(model, r):
     return sum(model.a[r, k] for k in model.K) == 1
 model.con_tour_assignment = pyo.Constraint(model.R, rule=tour_assignment_rule)
  
 # --- 5.2 LKW-BEWEGUNGSLOGIK ---
  
-# (NB4) LKW kann nicht zwei Touren gleichzeitig fahren
 def no_concurrent_tours_rule(model, k, z):
     return sum(model.active_tour[r, z] * model.a[r, k] for r in model.R) <= 1
 model.con_no_concurrent_tours = pyo.Constraint(model.K, model.Z, rule=no_concurrent_tours_rule)
  
-# (NB5) Kein gleichzeitiges Ankommen zweier Touren
 def no_concurrent_arrivals_rule(model, k, z):
     return sum(model.end_at[r, z] * model.a[r, k] for r in model.R) <= 1
 model.con_no_concurrent_arrivals = pyo.Constraint(model.K, model.Z, rule=no_concurrent_arrivals_rule)
  
-# (NB6) Definition depart
 def depart_definition_rule(model, k, z):
     return model.depart[k, z] == sum(model.start_at[r, z] * model.a[r, k] for r in model.R)
 model.con_depart_definition = pyo.Constraint(model.K, model.Z, rule=depart_definition_rule)
  
-# (NB7) Definition arrive
 def arrive_definition_rule(model, k, z):
     return model.arrive[k, z] == sum(model.end_at[r, z] * model.a[r, k] for r in model.R)
 model.con_arrive_definition = pyo.Constraint(model.K, model.Z, rule=arrive_definition_rule)
  
-# --- 5.3 ZUKUNFTSTOUREN-LOGIK ---
+# --- 5.4 ENERGIE-DYNAMIK ---
  
-# (NB8) has_future nur wenn Touren nach z existieren
-def has_future_upper_rule(model, k, z):
-    rAfter_z = [r for r in model.R if model.s_r[r] > z]
-    if len(rAfter_z) == 0:
-        return model.has_future[k, z] == 0
-    return model.has_future[k, z] <= sum(model.a[r, k] for r in rAfter_z)
-model.con_has_future_upper = pyo.Constraint(model.K, model.Z_night, rule=has_future_upper_rule)
+# Energieverbrauch als Expression (JETZT LINEAR mit a_type)
+def cons_expr_rule(model, k, z):
+    return sum(
+        sum(
+            model.a_type[r, k, t] * model.active_tour[r, z] *
+            (model.dist[r] * model.avgEv_e[t] / model.dur_z[r])
+            for r in model.R
+        )
+        for t in model.TE
+    )
+model.cons = pyo.Expression(model.K, model.Z, rule=cons_expr_rule)
  
-# (NB9) has_future muss gesetzt sein, wenn Touren existieren
-def has_future_lower_rule(model, k, z):
-    rAfter_z = [r for r in model.R if model.s_r[r] > z]
-    if len(rAfter_z) == 0:
-        return pyo.Constraint.Skip
-    return sum(model.a[r, k] for r in rAfter_z) >= model.has_future[k, z]
-model.con_has_future_lower = pyo.Constraint(model.K, model.Z_night, rule=has_future_lower_rule)
- 
-# (NB10) Obere Schranke für Tourenanzahl
-def has_future_bound_rule(model, k, z):
-    rAfter_z = [r for r in model.R if model.s_r[r] > z]
-    if len(rAfter_z) == 0:
-        return pyo.Constraint.Skip
-    return sum(model.a[r, k] for r in rAfter_z) <= len(rAfter_z) * model.has_future[k, z]
-model.con_has_future_bound = pyo.Constraint(model.K, model.Z_night, rule=has_future_bound_rule)
- 
-# (NB11) Genau eine nächste Tour bei Ankunft mit Zukunftstouren
-def next_tour_selection_rule(model, k, z):
-    rAfter_z = [r for r in model.R if model.s_r[r] > z]
-    if len(rAfter_z) == 0:
-        return pyo.Constraint.Skip
-    return sum(model.next[r, k, z] for r in rAfter_z) <= model.arrive[k, z]
-model.con_next_tour_selection = pyo.Constraint(model.K, model.Z_night, rule=next_tour_selection_rule)
- 
-# (NB11b) next erfordert has_future
-def next_requires_future_rule(model, k, z):
-    rAfter_z = [r for r in model.R if model.s_r[r] > z]
-    if len(rAfter_z) == 0:
-        return pyo.Constraint.Skip
-    return sum(model.next[r, k, z] for r in rAfter_z) <= model.has_future[k, z]
-model.con_next_requires_future = pyo.Constraint(model.K, model.Z_night, rule=next_requires_future_rule)
- 
-# (NB11c) wenn arrive=1 und has_future=1, dann muss genau eine next=1
-def next_when_both_rule(model, k, z):
-    rAfter_z = [r for r in model.R if model.s_r[r] > z]
-    if len(rAfter_z) == 0:
-        return pyo.Constraint.Skip
-    return sum(model.next[r, k, z] for r in rAfter_z) >= model.arrive[k, z] + model.has_future[k, z] - 1
-model.con_next_when_both = pyo.Constraint(model.K, model.Z_night, rule=next_when_both_rule)
- 
-# (NB12) next nur wenn Tour zugeordnet
-def next_requires_assignment_rule(model, r, k, z):
-    return model.next[r, k, z] <= model.a[r, k]
-model.con_next_requires_assignment = pyo.Constraint(model.R, model.K, model.Z_night, rule=next_requires_assignment_rule)
- 
-# (NB13) next=0 für Touren, die nicht nach z starten
-def next_only_after_rule(model, r, k, z):
-    if model.s_r[r] <= z:
-        return model.next[r, k, z] == 0
-    return pyo.Constraint.Skip
-model.con_next_only_after = pyo.Constraint(model.R, model.K, model.Z_night, rule=next_only_after_rule)
- 
-# (NB14) next ist wirklich die zeitlich nächste Tour
-def next_is_nearest_rule(model, r, k, z):
-    if model.s_r[r] <= z:
-        return pyo.Constraint.Skip
-    intermediate_tours = [rp for rp in model.R if z < model.s_r[rp] < model.s_r[r]]
-    if len(intermediate_tours) == 0:
-        return pyo.Constraint.Skip
-    return model.next[r, k, z] <= 1 - sum(model.next[rp, k, z] for rp in intermediate_tours)
-model.con_next_is_nearest = pyo.Constraint(model.R, model.K, model.Z_night, rule=next_is_nearest_rule)
- 
-# --- 5.4 ENERGIE-DYNAMIK (ANGEPASST FÜR VARIABLE TYPEN) ---
- 
-# (NB15) SOC-Dynamik
+# SOC-Dynamik
 def soc_dynamics_rule(model, k, z):
     if z == 96:
         return pyo.Constraint.Skip
@@ -378,39 +276,32 @@ def soc_dynamics_rule(model, k, z):
             sum(model.real_p[k, l, z] for l in model.L) * 0.25)
 model.con_soc_dynamics = pyo.Constraint(model.K, model.Z, rule=soc_dynamics_rule)
  
-# (NB17) SOC-Obergrenze (muss für alle Typen gelten)
+# SOC-Obergrenze
 def soc_upper_rule(model, k, z):
-    # SOC darf nicht größer sein als die Kapazität des zugewiesenen Typs
     return model.soc[k, z] <= sum(model.type_assignment[k, t] * model.soc_e[t] for t in model.TE) + \
-                               sum(model.type_assignment[k, t] * 1000 for t in model.TD)  # Große Zahl für Diesel
+                               sum(model.type_assignment[k, t] * 1000 for t in model.TD)
 model.con_soc_upper = pyo.Constraint(model.K, model.Z, rule=soc_upper_rule)
  
-# (NB18) KREISLAUF: Start = Ende
+# KREISLAUF: Start = Ende
 def soc_cycle_rule(model, k):
     return model.soc[k, 1] == model.soc[k, 96]
 model.con_soc_cycle = pyo.Constraint(model.K, rule=soc_cycle_rule)
  
-# --- 5.5 LADE-LOGIK (ANGEPASST) ---
+# --- 5.5 LADE-LOGIK ---
  
-# (NB21) Ladeleistung begrenzt durch LKW-Typ
 def charging_power_limit_rule(model, k, l, z):
-    # max_p für den zugewiesenen Typ
     return model.real_p[k, l, z] <= sum(model.type_assignment[k, t] * model.max_p_e[t] for t in model.T)
 model.con_charging_power_limit = pyo.Constraint(model.K, model.L, model.Z, rule=charging_power_limit_rule)
  
-# (NB22) Nur angesteckte LKWs können laden
 def assign_requires_plug_rule(model, k, l, z):
     return model.assign[k, l, z] <= model.plug[k, l, z]
 model.con_assign_requires_plug = pyo.Constraint(model.K, model.L, model.Z, rule=assign_requires_plug_rule)
  
-# (NB23) LKW nur an einer Säule gleichzeitig
 def one_charger_per_truck_rule(model, k, z):
     return sum(model.plug[k, l, z] for l in model.L) <= 1
-model.con_one_charger_per_truck_constraint = pyo.Constraint(model.K, model.Z, rule=one_charger_per_truck_rule)
+model.con_one_charger_per_truck = pyo.Constraint(model.K, model.Z, rule=one_charger_per_truck_rule)
  
-# (NB24+25) Diesel-LKWs dürfen nicht laden - LINEARISIERT
 def diesel_no_charging_rule(model, k, l, z):
-    # assign kann nur 1 sein wenn type_assignment[k,t] für t in TE
     return model.assign[k, l, z] <= sum(model.type_assignment[k, t] for t in model.TE)
 model.con_diesel_no_charging = pyo.Constraint(model.K, model.L, model.Z, rule=diesel_no_charging_rule)
  
@@ -418,19 +309,16 @@ def diesel_no_plug_rule(model, k, l, z):
     return model.plug[k, l, z] <= sum(model.type_assignment[k, t] for t in model.TE)
 model.con_diesel_no_plug = pyo.Constraint(model.K, model.L, model.Z, rule=diesel_no_plug_rule)
  
-# (NB26) Nicht gleichzeitig laden und fahren
 def no_charge_while_driving_rule(model, k, z):
     return sum(model.plug[k, l, z] for l in model.L) <= 1 - sum(model.active_tour[r, z] * model.a[r, k] for r in model.R)
 model.con_no_charge_while_driving = pyo.Constraint(model.K, model.Z, rule=no_charge_while_driving_rule)
  
-# (NB27) Bei Tourstart nicht angesteckt
 def unplug_before_departure_rule(model, k, l, z):
     if z == 96:
         return pyo.Constraint.Skip
     return model.plug[k, l, z] <= 1 - model.depart[k, z+1]
 model.con_unplug_before_departure = pyo.Constraint(model.K, model.L, model.Z, rule=unplug_before_departure_rule)
  
-# (NB28) Abstecken nur wenn erlaubt
 def unplug_timing_rule(model, k, l, z):
     if z == 96:
         return pyo.Constraint.Skip
@@ -439,152 +327,106 @@ model.con_unplug_timing = pyo.Constraint(model.K, model.L, model.Z, rule=unplug_
  
 # --- 5.6 LADESÄULEN-KAPAZITÄTEN ---
  
-# (NB29) Anzahl ladender LKWs pro Säule
 def charger_assign_capacity_rule(model, l, z):
     return sum(model.assign[k, l, z] for k in model.K) <= model.y_l[l] * model.cs_l[l]
 model.con_charger_assign_capacity = pyo.Constraint(model.L, model.Z, rule=charger_assign_capacity_rule)
  
-# (NB30) Anzahl angesteckter LKWs pro Säule
 def charger_plug_capacity_rule(model, l, z):
     return sum(model.plug[k, l, z] for k in model.K) <= model.y_l[l] * model.cs_l[l]
 model.con_charger_plug_capacity = pyo.Constraint(model.L, model.Z, rule=charger_plug_capacity_rule)
  
-# (NB31) Gesamtladeleistung pro Säule
 def charger_power_capacity_rule(model, l, z):
     return sum(model.real_p[k, l, z] for k in model.K) <= model.y_l[l] * model.max_p_l[l]
 model.con_charger_power_capacity = pyo.Constraint(model.L, model.Z, rule=charger_power_capacity_rule)
  
-# --- 5.7 NACHT-LADELOGIK (VEREINFACHT) ---
- 
-# Vorerst deaktiviert für erste Tests
-# Die SOC-Dynamik erzwingt bereits das notwendige Laden
- 
 # --- 5.8 NETZ UND SPEICHER ---
  
-# (NB37) Netzlastbilanz
 def grid_balance_rule(model, z):
     return (model.p_grid[z] == sum(model.real_p[k, l, z] for k in model.K for l in model.L) +
             model.p_l_s[z] - model.p_e_s[z])
 model.con_grid_balance = pyo.Constraint(model.Z, rule=grid_balance_rule)
  
-# (NB38) Netzanschluss-Limit
 def grid_limit_rule(model, z):
     return model.p_grid[z] <= model.p_grid_max + 500 * model.u
- 
 model.con_grid_limit = pyo.Constraint(model.Z, rule=grid_limit_rule)
  
-# (NB39) Leistungsspitze definieren
 def peak_power_rule(model, z):
     return model.p_grid[z] <= model.p_peak
- 
 model.con_peak_power = pyo.Constraint(model.Z, rule=peak_power_rule)
  
-# (NB40) Speicher-Dynamik
 def storage_dynamics_rule(model, z):
     if z == 96:
         return pyo.Constraint.Skip
     return (model.soc_s[z+1] == model.soc_s[z] + model.p_l_s[z] * model.delta_t -
             (1/model.nrt) * model.p_e_s[z] * model.delta_t)
- 
 model.con_storage_dynamics = pyo.Constraint(model.Z, rule=storage_dynamics_rule)
  
-# (NB41) Speicher tagesneutral
 def storage_neutral_rule(model):
     return model.soc_s[1] == model.soc_s[96]
- 
 model.con_storage_neutral = pyo.Constraint(rule=storage_neutral_rule)
  
-# (NB42) Speicher-Obergrenze
 def storage_capacity_rule(model, z):
     return model.soc_s[z] <= model.q_s
- 
 model.con_storage_capacity = pyo.Constraint(model.Z, rule=storage_capacity_rule)
  
-# (NB43) Speicher-Untergrenze
 def storage_reserve_rule(model, z):
     return model.soc_s[z] >= model.dod * model.q_s
- 
 model.con_storage_reserve = pyo.Constraint(model.Z, rule=storage_reserve_rule)
  
-# (NB44) Speicher-Lademodus
 def storage_charge_mode_rule(model, z):
     return model.p_l_s[z] <= model.p_s
- 
 model.con_storage_charge_mode = pyo.Constraint(model.Z, rule=storage_charge_mode_rule)
  
 def storage_charge_mode_binary_rule(model, z):
     return model.p_l_s[z] <= 10000 * model.mode_s[z]
- 
 model.con_storage_charge_mode_binary = pyo.Constraint(model.Z, rule=storage_charge_mode_binary_rule)
  
-# (NB45) Speicher-Entlademodus
 def storage_discharge_mode_rule(model, z):
     return model.p_e_s[z] <= model.p_s
- 
 model.con_storage_discharge_mode = pyo.Constraint(model.Z, rule=storage_discharge_mode_rule)
  
 def storage_discharge_mode_binary_rule(model, z):
     return model.p_e_s[z] <= 10000 * (1 - model.mode_s[z])
- 
 model.con_storage_discharge_mode_binary = pyo.Constraint(model.Z, rule=storage_discharge_mode_binary_rule)
  
 # ============================================================================
-# 6. ZIELFUNKTION (ANGEPASST)
+# 6️⃣ ZIELFUNKTION (LINEARISIERT)
 # ============================================================================
  
 def objective_rule(model):
-    # C_trucks: LKW-Fixkosten (jetzt ueber type_assignment)
+    # C_trucks: LKW-Fixkosten (linear)
     C_trucks = sum(
-        sum(
-            model.type_assignment[k, t] * (model.cap_d[t] + model.opx_d[t] + model.kfz_d[t])
-            for t in model.TD
-        ) +
-        sum(
-            model.type_assignment[k, t] * (model.cap_e[t] + model.opx_e[t])
-            for t in model.TE
-        )
+        sum(model.type_assignment[k, t] * (model.cap_d[t] + model.opx_d[t] + model.kfz_d[t]) for t in model.TD) +
+        sum(model.type_assignment[k, t] * (model.cap_e[t] + model.opx_e[t]) for t in model.TE)
         for k in model.K
     )
- 
-    # C_chargers: Ladeinfrastruktur
-    C_chargers = sum(
-        model.y_l[l] * (model.cap_l[l] + model.opx_l[l])
-        for l in model.L
-    )
- 
-    # C_grid_trafo: Netzanschluss/Trafo
+   
+    # C_chargers
+    C_chargers = sum(model.y_l[l] * (model.cap_l[l] + model.opx_l[l]) for l in model.L)
+   
+    # C_grid_trafo
     C_grid_trafo = 10000 * model.u
- 
-    # C_storage: Stationaerer Speicher
-    C_storage = (model.capP_s * model.p_s + model.capQ_s * model.q_s) + \
-                model.opx_s * (model.capP_s * model.p_s + model.capQ_s * model.q_s)
- 
-    # C_diesel_var: Dieselverbrauch + Maut (linearisiert)
+   
+    # C_storage
+    C_storage = (1 + model.opx_s) * (model.capP_s * model.p_s + model.capQ_s * model.q_s)
+   
+    # C_diesel_var: LINEARISIERT mit a_type (nur für TD)
     C_diesel_var = 260 * sum(
-        sum(
-            sum(
-                model.a[r, k] * model.type_assignment[k, t] *
-                (model.c_m_d * model.mDist[r] + model.c_diesel * (model.dist[r]/100) * model.avgDv_d[t])
-                for t in model.TD
-            )
-            for k in model.K
-        )
-        for r in model.R
+        model.a_type[r, k, t] * (model.c_m_d * model.mDist[r] +
+                                  model.c_diesel * (model.dist[r]/100) * model.avgDv_d[t])
+        for r in model.R for k in model.K for t in model.TD
     )
- 
-    # C_electricity: Strom
+   
+    # C_electricity
     C_electricity = model.c_gr + model.cPeak * model.p_peak + \
                     260 * model.c_e * sum(model.p_grid[z] * model.delta_t for z in model.Z)
- 
-    # C_revenue: THG-Erloese
+   
+    # C_revenue
     C_revenue = sum(
-        sum(
-            model.type_assignment[k, t] * model.thg_e[t]
-            for t in model.TE
-        )
+        sum(model.type_assignment[k, t] * model.thg_e[t] for t in model.TE)
         for k in model.K
     )
- 
+   
     return C_trucks + C_chargers + C_grid_trafo + C_storage + C_diesel_var + C_electricity - C_revenue
  
 model.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
@@ -595,196 +437,126 @@ model.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
  
 # Solver installieren
 print("Installiere Solver...")
-# !apt-get install -y -qq glpk-utils
-# !apt-get install -y -qq coinor-cbc
+!apt-get install -y -qq glpk-utils
+!apt-get install -y -qq coinor-cbc
 print("Solver-Installation abgeschlossen.\n")
  
 # ============================================================================
-# 7. SOLVER
+# 7️⃣ SOLVER
 # ============================================================================
  
 print("=" * 80)
-print("MODELL WIRD GELOEST...")
+print("MODELL WIRD GELÖST...")
 print("=" * 80)
  
-# Versuche verschiedene Solver
+# CBC bevorzugen (bessere Heuristiken als GLPK)
 solver = None
 solver_name = None
  
-# Versuche zuerst GLPK
+# Versuche zuerst CBC
 try:
-    solver = SolverFactory('glpk')
+    solver = SolverFactory('cbc')
     if solver.available():
-        solver_name = 'glpk'
+        solver_name = 'cbc'
         print(f"Verwende Solver: {solver_name}")
 except:
     pass
  
-# Falls GLPK nicht verfuegbar, versuche CBC
+# Falls CBC nicht verfügbar, GLPK
 if solver is None or not solver.available():
     try:
-        solver = SolverFactory('cbc')
+        solver = SolverFactory('glpk')
         if solver.available():
-            solver_name = 'cbc'
+            solver_name = 'glpk'
             print(f"Verwende Solver: {solver_name}")
     except:
         pass
  
-# Wenn kein Solver verfuegbar
-if solver is None or not solver.available():
-    print("FEHLER: Kein Solver verfuegbar!")
-    print("Versuche manuelle Installation...")
-    # !pip install -q glpk
-    solver = SolverFactory('glpk')
-    solver_name = 'glpk'
+# Solver-Optionen für frühe Feasible Solution und 2h Zeitlimit
+if solver_name == 'cbc':
+    solver.options['seconds'] = 7200          # 2 Stunden Zeitlimit
+    solver.options['heuristics'] = 'on'       # Heuristiken aktivieren
+    solver.options['round'] = 'on'            # Rounding Heuristik
+    solver.options['feas'] = 'on'             # Feasibility Pump
+    solver.options['passF'] = 100             # Feasibility Pump Passes
+    solver.options['cuts'] = 'on'             # Schnittebenen aktivieren
+    solver.options['preprocess'] = 'on'       # Preprocessing
+    solver.options['printingOptions'] = 'all' # Vollständige Ausgabe
+   
+elif solver_name == 'glpk':
+    solver.options['tmlim'] = 7200  # 2 Stunden Zeitlimit - das reicht!
  
-# Optional: Solver-Optionen setzen
-if solver_name == 'glpk':
-    solver.options['tmlim'] = 600  # Zeitlimit 10 Minuten fuer GLPK
-elif solver_name == 'cbc':
-    solver.options['seconds'] = 600  # Zeitlimit 10 Minuten fuer CBC
- 
-# Modell loesen
-print(f"\nStarte Optimierung mit {solver_name}...\n")
+# Modell lösen
+print(f"\nStarte Optimierung mit {solver_name} (Zeitlimit: 2 Stunden)...\n")
 results = solver.solve(model, tee=True)
  
 # ============================================================================
-# 8. ERGEBNIS-AUSGABE
+# ERGEBNIS-AUSWERTUNG (auch bei TimeLimit)
 # ============================================================================
  
 print("\n" + "=" * 80)
 print("OPTIMIERUNGSERGEBNISSE")
 print("=" * 80)
  
-# Status pruefen
-if (results.solver.status == pyo.SolverStatus.ok and
-    results.solver.termination_condition == pyo.TerminationCondition.optimal):
+# Prüfe ob eine Lösung gefunden wurde (optimal ODER feasible bei TimeLimit)
+solution_found = False
  
-    print("\n OPTIMALE LOESUNG GEFUNDEN\n")
+if results.solver.status == pyo.SolverStatus.ok:
+    if results.solver.termination_condition == pyo.TerminationCondition.optimal:
+        print("\n✅ OPTIMALE LÖSUNG GEFUNDEN\n")
+        solution_found = True
+    elif results.solver.termination_condition == pyo.TerminationCondition.feasible:
+        print("\n⚠️ ZULÄSSIGE LÖSUNG GEFUNDEN (nicht bewiesen optimal)\n")
+        solution_found = True
+       
+elif results.solver.status == pyo.SolverStatus.aborted:
+    # TimeLimit erreicht - prüfe ob trotzdem eine Lösung existiert
+    if results.solver.termination_condition == pyo.TerminationCondition.maxTimeLimit:
+        print("\n⏱️ ZEITLIMIT ERREICHT\n")
+        # Prüfe ob eine feasible Lösung gefunden wurde
+        try:
+            obj_value = pyo.value(model.obj)
+            if obj_value is not None:
+                print("✅ Beste gefundene Lösung wird verwendet.\n")
+                solution_found = True
+        except:
+            pass
  
-    # A) ZIELFUNKTIONSWERT
-    print("-" * 80)
-    print("ZIELFUNKTIONSWERT")
-    print("-" * 80)
-    print(f"Gesamtkosten (jaehrlich): {pyo.value(model.obj):,.2f} EUR")
-    print()
- 
-    # FLOTTENZUSAMMENSETZUNG (NEU!)
-    print("-" * 80)
-    print("OPTIMALE FLOTTENZUSAMMENSETZUNG")
-    print("-" * 80)
- 
-    fleet_composition = {}
+# Falls Lösung gefunden, Ergebnisse ausgeben
+if solution_found:
+    print(f"Zielfunktionswert: {pyo.value(model.obj):,.2f}")
+
+    # 1) LKW-Typ je Truck
+    print("\n--- LKW-Typen je Truck ---")
     for k in model.K:
         for t in model.T:
             if pyo.value(model.type_assignment[k, t]) > 0.5:
-                if t not in fleet_composition:
-                    fleet_composition[t] = []
-                fleet_composition[t].append(k)
- 
-    for t in sorted(fleet_composition.keys()):
-        print(f"\n{t}: {len(fleet_composition[t])} LKW(s)")
-        print(f"  LKW-IDs: {fleet_composition[t]}")
- 
-    print()
- 
-    # B) ZUORDNUNG LKW <-> TOUREN
-    print("-" * 80)
-    print("TOUR-ZUORDNUNG ZU LKWs")
-    print("-" * 80)
- 
-    for k in sorted(model.K):
-        tours_assigned = [r for r in model.R if pyo.value(model.a[r, k]) > 0.5]
-        if tours_assigned:
-            # Finde Typ
-            truck_type = None
-            for t in model.T:
-                if pyo.value(model.type_assignment[k, t]) > 0.5:
-                    truck_type = t
-                    break
-            print(f"\nLKW {k} (Typ: {truck_type}):")
-            for r in tours_assigned:
-                start_time = (model.s_r[r] - 1) * 0.25
-                end_time = (model.e_r[r] - 1) * 0.25
-                print(f"  - Tour {r:4s}: Start {start_time:5.2f}h (Int {model.s_r[r]:2d}), "
-                      f"Ende {end_time:5.2f}h (Int {model.e_r[r]:2d}), "
-                      f"Distanz {model.dist[r]:3.0f} km")
-    print()
- 
-    # C) LADEINFRASTRUKTUR
-    print("-" * 80)
-    print("INSTALLIERTE LADEINFRASTRUKTUR")
-    print("-" * 80)
- 
-    total_chargers = 0
-    for l in model.L:
-        num_chargers = int(pyo.value(model.y_l[l]))
-        if num_chargers > 0:
-            total_points = num_chargers * model.cs_l[l]
-            print(f"{l:20s}: {num_chargers} Saeule(n) x {model.cs_l[l]} Ladepunkte "
-                  f"= {total_points} Ladepunkte gesamt")
-            print(f"                      Max. Leistung: {model.max_p_l[l]} kW pro Saeule")
-            total_chargers += num_chargers
- 
-    print(f"\nGesamt: {total_chargers} Ladesaeule(n)")
-    print()
- 
-    # D) ZUSAETZLICHE INFORMATIONEN
-    print("-" * 80)
-    print("WEITERE KENNZAHLEN")
-    print("-" * 80)
- 
-    # Trafo
-    trafo_installed = pyo.value(model.u) > 0.5
-    print(f"Transformator installiert: {'Ja' if trafo_installed else 'Nein'}")
- 
-    # Netzspitze
-    peak_power = pyo.value(model.p_peak)
-    print(f"Netzspitzenleistung: {peak_power:.2f} kW")
- 
-    # Speicher
-    storage_power = pyo.value(model.p_s)
-    storage_capacity = pyo.value(model.q_s)
-    if storage_power > 0.01 or storage_capacity > 0.01:
-        print(f"Speicher installiert: Leistung {storage_power:.2f} kW, "
-              f"Kapazitaet {storage_capacity:.2f} kWh")
-    else:
-        print("Speicher installiert: Nein")
- 
-    print()
- 
-    # E) SOC-INFORMATIONEN (optional, nur fuer E-LKWs)
-    print("-" * 80)
-    print("LADEZUSTAENDE E-LKWs (Start und Ende)")
-    print("-" * 80)
- 
+                print(f"Truck {k}: {t}")
+
+    # 2) Tour-Zuordnung je Truck
+    print("\n--- Tour-Zuordnung (Truck -> Tour) ---")
     for k in model.K:
-        is_electric = sum(pyo.value(model.type_assignment[k, t]) for t in model.TE) > 0.5
-        if is_electric:
-            truck_type = None
-            for t in model.TE:
-                if pyo.value(model.type_assignment[k, t]) > 0.5:
-                    truck_type = t
-                    break
-            soc_start = pyo.value(model.soc[k, 1])
-            soc_end = pyo.value(model.soc[k, 96])
-            print(f"LKW {k} ({truck_type}): Start {soc_start:.1f} kWh, "
-                  f"Ende {soc_end:.1f} kWh "
-                  f"(Kapazitaet: {model.soc_e[truck_type]} kWh)")
- 
-    print()
- 
-elif results.solver.termination_condition == pyo.TerminationCondition.infeasible:
-    print("\n MODELL IST INFEASIBLE (keine zulaessige Loesung)")
-    print("Moegliche Ursachen:")
-    print("  - Widerspruechliche Nebenbedingungen")
-    print("  - Zu restriktive Zeitfenster")
-    print("  - Unzureichende Ladeinfrastruktur-Kapazitaeten")
- 
+        assigned = [r for r in model.R if pyo.value(model.a[r, k]) > 0.5]
+        if assigned:
+            print(f"Truck {k}: {assigned[0]}")
+
+    # 3) Anzahl Ladesäulen
+    print("\n--- Installierte Ladesäulen ---")
+    for l in model.L:
+        print(f"{l}: {pyo.value(model.y_l[l])}")
+
+    # 4) Peak und Netzanschluss
+    print("\n--- Netz ---")
+    print(f"p_peak: {pyo.value(model.p_peak):.2f} kW")
+    print(f"Trafo-Upgrade u: {int(round(pyo.value(model.u)))}")
+
+    # 5) Beispiel: SOC von Truck 1 (nur wenige Zeitpunkte)
+    k0 = 1
+    print(f"\n--- SOC Truck {k0} (Auszug) ---")
+    for z in [1, 25, 48, 72, 96]:
+        print(f"z={z}: {pyo.value(model.soc[k0, z]):.2f}")
+
 else:
-    print(f"\n SOLVER-STATUS: {results.solver.status}")
-    print(f"TERMINATION CONDITION: {results.solver.termination_condition}")
- 
-print("\n" + "=" * 80)
-print("OPTIMIERUNG ABGESCHLOSSEN")
-print("=" * 80)
+    print("\n❌ KEINE ZULÄSSIGE LÖSUNG GEFUNDEN")
+    print(f"Solver-Status: {results.solver.status}")
+    print(f"Termination Condition: {results.solver.termination_condition}")
