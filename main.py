@@ -678,7 +678,19 @@ if solution_found:
     print(f"  davon Elektro: {n_elektro}")
     print(f"  davon Diesel:  {n_diesel}")
     print(f"Elektro-Anteil:  {100*n_elektro/aktive_lkw:.1f}%" if aktive_lkw > 0 else "")
-
+    # MIP-Gap anzeigen (falls verfügbar)
+    try:
+        if hasattr(results.problem, 'lower_bound') and hasattr(results.problem, 'upper_bound'):
+            lower_bound = results.problem.lower_bound
+            upper_bound = results.problem.upper_bound
+            if lower_bound is not None and upper_bound is not None and upper_bound > 0:
+                gap = 100 * (upper_bound - lower_bound) / upper_bound
+                print(f"Untere Schranke: {lower_bound:,.2f} €")
+                print(f"MIP-Gap: {gap:.2f}%")
+        elif hasattr(results.solver, 'gap'):
+            print(f"MIP-Gap: {results.solver.gap:.2f}%")
+    except:
+        pass
 else:
     print("\n❌ KEINE ZULÄSSIGE LÖSUNG GEFUNDEN")
     print(f"Solver-Status: {results.solver.status}")
