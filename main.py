@@ -524,31 +524,169 @@ elif results.solver.status == pyo.SolverStatus.aborted:
  
 # Falls Lösung gefunden, Ergebnisse ausgeben
 if solution_found:
-    print(f"Zielfunktionswert: {pyo.value(model.obj):,.2f}")
-
-    # 1) LKW-Typ je Truck
-    print("\n--- LKW-Typen je Truck ---")
-    for k in model.K:
+    # ZIELFUNKTIONSWERT
+    print("-" * 80)
+    print("📊 ZIELFUNKTIONSWERT")
+    print("-" * 80)
+    print(f"Gesamtkosten (jährlich): {pyo.value(model.obj):,.2f} €")
+    
+    # DIAGNOSE: Alle Touren prüfen
+    print("\n" + "-" * 80)
+    print("🔍 TOUR-ZUORDNUNG PRÜFUNG")
+    print("-" * 80)
+    
+    alle_touren = list(model.R)
+    zugeordnete_touren = []
+    
+    for r in model.R:
+        zugeordnet = False
+        for k in model.K:
+            if pyo.value(model.a[r, k]) > 0.5:
+                zugeordnete_touren.append(r)
+                zugeordnet = True
+                break
+        if not zugeordnet:
+            print(f"⚠️ Tour {r}: NICHT ZUGEORDNET!")
+    
+    print(f"\nGesamt Touren: {len(alle_touren)}")
+    print(f"Zugeordnet: {len(zugeordnete_touren)}")
+    print(f"Fehlend: {len(alle_touren) - len(zugeordnete_touren)}")
+    
+    # LKW-TYPEN UND TOUR-ZUORDNUNG
+    print("\n" + "-" * 80)
+    print("🚛 LKW-TYPEN UND TOUR-ZUORDNUNG")
+    print("-" * 80)
+    
+    for k in sorted(model.K):
+        # Finde Typ
+        truck_type = None
         for t in model.T:
             if pyo.value(model.type_assignment[k, t]) > 0.5:
-                print(f"Truck {k}: {t}")
-
-    # 2) Tour-Zuordnung je Truck
-    print("\n--- Tour-Zuordnung (Truck -> Tour) ---")
-    for k in model.K:
-        assigned = [r for r in model.R if pyo.value(model.a[r, k]) > 0.5]
-        if assigned:
-            print(f"Truck {k}: {assigned[0]}")
-
-    # 3) Anzahl Ladesäulen
-    print("\n--- Installierte Ladesäulen ---")
+                truck_type = t
+                break
+        
+        # Finde ALLE Touren
+        tours = [r for r in model.R if pyo.value(model.a[r, k]) > 0.5]
+        
+        if tours:
+            typ_kat = "E" if truck_type in model.TE else "D"
+            total_km = sum(model.dist[r] for r in tours)
+            sorted_tours = sorted(tours, key=lambda x: model.s_r[x])
+            
+            print(f"\nLKW {k} | Typ: {truck_type} [{typ_kat}] | {len(tours)} Tour(en) | {total_km} km")
+            for r in sorted_tours:
+                start_h = (model.s_r[r]-1)*0.25
+                end_h = (model.e_r[r]-1)*0.25
+                print(f"    → {r}: {start_h:.2f}h - {end_h:.2f}h, {model.dist[r]} km")
+    
+    # LADEINFRASTRUKTUR
+    print("\n" + "-" * 80)
+    print("⚡ LADEINFRASTRUKTUR")
+    print("-" * 80)
+    
+    total_chargers = 0
+    total_ladepunkte = 0
+    max_ladeleistung = 0
+    
     for l in model.L:
-        print(f"{l}: {pyo.value(model.y_l[l])}")
+        n = int(round(pyo.value(model.y_l[l])))
+        if n > 0:
+            total_chargers += n
+            punkte = n * model.cs_l[l]
+            leistung = n * model.max_p_l[l]
+            total_ladepunkte += punkte
+            max_ladeleistung += leistung
+            print(f"{l}: {n} Säule(n), {punkte} Ladepunkte, max {leistung} kW")
+    
+    if total_chargers == 0:
+        print("Keine Ladesäulen (reine Diesel-Flotte)")
+    else:
+        print(f"\n{'─'*40}")
+        print(f"GESAMT LADESÄULEN:    {total_chargers}")
+        print(f"GESAMT LADEPUNKTE:    {total_ladepunkte}")
+        print(f"MAX. LADELEISTUNG:    {max_ladeleistung} kW")
+    
+    # NETZ & ERWEITERUNGEN
+    print("\n" + "-" * 80)
+    print("🔌 NETZ & ERWEITERUNGEN")
+    print("-" * 80)
+    
+    trafo = pyo.value(model.u) > 0.5
+    peak = pyo.value(model.p_peak)
+    storage_p = pyo.value(model.p_s)
+    storage_q = pyo.value(model.q_s)
+    
+    basis_netz = model.p_grid_max
+    erweiterung = 500 if trafo else 0
+    max_netz = basis_netz + erweiterung
+    
+    print(f"\nNetzanschluss:")
+    print(f"  Basis-Kapazität:           {basis_netz} kW")
+    print(f"  Trafo-Erweiterung:         {'+500 kW' if trafo else 'NEIN'}")
+    print(f"  ─────────────────────────────────")
+    print(f"  MAX. NETZKAPAZITÄT:        {max_netz} kW")
+    print(f"  Tatsächliche Spitzenlast:  {peak:.2f} kW")
+    print(f"  Auslastung:                {100*peak/max_netz:.1f}%")
+    
+    # ZUSATZOPTIONEN ZUSAMMENFASSUNG
+    print("\n" + "-" * 80)
+    print("📋 ZUSAMMENFASSUNG ZUSATZOPTIONEN")
+    print("-" * 80)
+    
+    print(f"\n{'Option':<35} {'Status':<10} {'Details'}")
+    print("=" * 70)
+    print(f"{'Trafo-Erweiterung (+500 kW)':<35} {'✅ JA' if trafo else '❌ NEIN':<10} {'Kosten: 10.000 €/Jahr' if trafo else ''}")
+    
+    if storage_p > 0.01 or storage_q > 0.01:
+        storage_cost = (1 + model.opx_s) * (model.capP_s * storage_p + model.capQ_s * storage_q)
+        print(f"{'Stationärer Speicher':<35} {'✅ JA':<10} {storage_p:.1f} kW / {storage_q:.1f} kWh")
+        print(f"{'':<35} {'':<10} Kosten: {storage_cost:,.0f} €/Jahr")
+    else:
+        print(f"{'Stationärer Speicher':<35} {'❌ NEIN':<10}")
+    
+    # Ladesäulen als "Option"
+    if total_chargers > 0:
+        charger_cost = sum(pyo.value(model.y_l[l]) * (model.cap_l[l] + model.opx_l[l]) for l in model.L)
+        print(f"{'Ladeinfrastruktur':<35} {'✅ JA':<10} {total_chargers} Säulen, {total_ladepunkte} Punkte")
+        print(f"{'':<35} {'':<10} Kosten: {charger_cost:,.0f} €/Jahr")
+    else:
+        print(f"{'Ladeinfrastruktur':<35} {'❌ NEIN':<10}")
+    
+    # FLOTTEN-ZUSAMMENFASSUNG
+    print("\n" + "-" * 80)
+    print("🚗 FLOTTEN-ZUSAMMENFASSUNG")
+    print("-" * 80)
+    
+    n_elektro = 0
+    n_diesel = 0
+    aktive_lkw = 0
+    
+    for k in model.K:
+        hat_tour = any(pyo.value(model.a[r, k]) > 0.5 for r in model.R)
+        if hat_tour:
+            aktive_lkw += 1
+            for t in model.TE:
+                if pyo.value(model.type_assignment[k, t]) > 0.5:
+                    n_elektro += 1
+                    break
+            for t in model.TD:
+                if pyo.value(model.type_assignment[k, t]) > 0.5:
+                    n_diesel += 1
+                    break
+    
+    print(f"\nAktive LKWs:     {aktive_lkw}")
+    print(f"  davon Elektro: {n_elektro}")
+    print(f"  davon Diesel:  {n_diesel}")
+    print(f"Elektro-Anteil:  {100*n_elektro/aktive_lkw:.1f}%" if aktive_lkw > 0 else "")
 
-    # 4) Peak und Netzanschluss
-    print("\n--- Netz ---")
-    print(f"p_peak: {pyo.value(model.p_peak):.2f} kW")
-    print(f"Trafo-Upgrade u: {int(round(pyo.value(model.u)))}")
+else:
+    print("\n❌ KEINE ZULÄSSIGE LÖSUNG GEFUNDEN")
+    print(f"Solver-Status: {results.solver.status}")
+    print(f"Termination Condition: {results.solver.termination_condition}")
+
+print("\n" + "=" * 80)
+print("FERTIG")
+print("=" * 80)
 
     # 5) Beispiel: SOC von Truck 1 (nur wenige Zeitpunkte)
     k0 = 1
