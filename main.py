@@ -29,7 +29,7 @@ model.R = pyo.Set(initialize=[
 ])
  
 # LKWs - ERHÖHT AUF 15
-model.K = pyo.Set(initialize=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
+model.K = pyo.Set(initialize=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
  
 # Diesel-LKW-Typen
 model.TD = pyo.Set(initialize=['ActrosL'])
@@ -112,7 +112,7 @@ model.cap_d = pyo.Param(model.TD, initialize={'ActrosL': 24000})
 model.opx_d = pyo.Param(model.TD, initialize={'ActrosL': 6000})
 model.kfz_d = pyo.Param(model.TD, initialize={'ActrosL': 556})
 model.avgDv_d = pyo.Param(model.TD, initialize={'ActrosL': 0.26})
-model.c_diesel = pyo.Param(initialize=1.68)
+model.c_diesel = pyo.Param(initialize=1.5)
 model.c_m_d = pyo.Param(initialize=0.34)
  
 # --- Elektro-LKW-Parameter ---
@@ -439,7 +439,7 @@ def objective_rule(model):
     
     C_diesel_var = 260 * sum(
         model.a_type[r, k, t] * (model.c_m_d * model.mDist[r] +
-                                  model.c_diesel * (model.dist[r]/100) * model.avgDv_d[t])
+                                  model.c_diesel * (model.dist[r]) * model.avgDv_d[t])
         for r in model.R for k in model.K for t in model.TD
     )
     
@@ -476,38 +476,54 @@ print("=" * 80)
 solver = None
 solver_name = None
  
-# Versuche zuerst CBC
+# Solver auswählen
+solver = None
+solver_name = None
+
+# Versuche zuerst HiGHS (beste Ausgabe)
 try:
-    solver = SolverFactory('cbc')
+    solver = SolverFactory('appsi_highs')
     if solver.available():
-        solver_name = 'cbc'
+        solver_name = 'HiGHS'
         print(f"Verwende Solver: {solver_name}")
 except:
     pass
- 
+
+# Falls HiGHS nicht verfügbar, CBC
+if solver is None or not solver.available():
+    try:
+        solver = SolverFactory('cbc')
+        if solver.available():
+            solver_name = 'CBC'
+            print(f"Verwende Solver: {solver_name}")
+    except:
+        pass
+
 # Falls CBC nicht verfügbar, GLPK
 if solver is None or not solver.available():
     try:
         solver = SolverFactory('glpk')
         if solver.available():
-            solver_name = 'glpk'
+            solver_name = 'GLPK'
             print(f"Verwende Solver: {solver_name}")
     except:
         pass
  
-# Solver-Optionen für frühe Feasible Solution und 2h Zeitlimit
-if solver_name == 'cbc':
-    solver.options['seconds'] = 7200          # 2 Stunden Zeitlimit
-    solver.options['heuristics'] = 'on'       # Heuristiken aktivieren
-    solver.options['round'] = 'on'            # Rounding Heuristik
-    solver.options['feas'] = 'on'             # Feasibility Pump
-    solver.options['passF'] = 100             # Feasibility Pump Passes
-    solver.options['cuts'] = 'on'             # Schnittebenen aktivieren
-    solver.options['preprocess'] = 'on'       # Preprocessing
-    solver.options['printingOptions'] = 'all' # Vollständige Ausgabe
-   
-elif solver_name == 'glpk':
-    solver.options['tmlim'] = 7200  # 2 Stunden Zeitlimit - das reicht!
+# Solver-Optionen
+    if solver_name == 'HiGHS':
+        solver.options['time_limit'] = 3600
+        solver.options['log_to_console'] = True
+    elif solver_name == 'CBC':
+        solver.options['seconds'] = 3600
+        solver.options['heuristics'] = 'on'
+        solver.options['round'] = 'on'
+        solver.options['feas'] = 'on'
+        solver.options['cuts'] = 'on'
+    elif solver_name == 'GLPK':
+        solver.options['tmlim'] = 3600
+    
+    print(f"\nStarte Optimierung (Zeitlimit: 1 Stunde)...\n")
+    results = solver.solve(model, tee=True)
  
 # Modell lösen
 print(f"\nStarte Optimierung mit {solver_name} (Zeitlimit: 2 Stunden)...\n")
@@ -547,6 +563,806 @@ elif results.solver.status == pyo.SolverStatus.aborted:
  
 # Falls Lösung gefunden, Ergebnisse ausgeben
 if solution_found:
+    # ========================================================================
+    # BASIS-INFORMATIONEN (aus Original-Ausgabe)
+    # ========================================================================
+    
+    print("\n" + "=" * 100)
+    print("OPTIMIERUNGSERGEBNISSE - ÜBERSICHT")
+    print("=" * 100)
+    
+    # --- ZIELFUNKTIONSWERT ---
+    print("\n" + "-" * 100)
+    print("📊 ZIELFUNKTIONSWERT")
+    print("-" * 100)
+    print(f"Gesamtkosten (jährlich): {pyo.value(model.obj):,.2f} €")
+    
+    # --- MIP-GAP ---
+    try:
+        if hasattr(results.problem, 'lower_bound') and hasattr(results.problem, 'upper_bound'):
+            lower_bound = results.problem.lower_bound
+            upper_bound = results.problem.upper_bound
+            if lower_bound is not None and upper_bound is not None and upper_bound > 0:
+                gap = 100 * (upper_bound - lower_bound) / upper_bound
+                print(f"Untere Schranke:         {lower_bound:,.2f} €")
+                print(f"Obere Schranke:          {upper_bound:,.2f} €")
+                print(f"MIP-Gap:                 {gap:.4f} %")
+        elif hasattr(results.solver, 'gap'):
+            print(f"MIP-Gap:                 {results.solver.gap:.4f} %")
+    except:
+        pass
+    
+    # --- TOUR-ZUORDNUNG PRÜFUNG ---
+    print("\n" + "-" * 100)
+    print("🔍 TOUR-ZUORDNUNG PRÜFUNG")
+    print("-" * 100)
+    
+    alle_touren = list(model.R)
+    zugeordnete_touren = []
+    nicht_zugeordnet = []
+    
+    for r in model.R:
+        zugeordnet = False
+        for k in model.K:
+            if pyo.value(model.a[r, k]) > 0.5:
+                zugeordnete_touren.append(r)
+                zugeordnet = True
+                break
+        if not zugeordnet:
+            nicht_zugeordnet.append(r)
+            print(f"⚠️ Tour {r}: NICHT ZUGEORDNET!")
+    
+    print(f"\nGesamt Touren:    {len(alle_touren)}")
+    print(f"Zugeordnet:       {len(zugeordnete_touren)}")
+    print(f"Fehlend:          {len(nicht_zugeordnet)}")
+    
+    if len(nicht_zugeordnet) == 0:
+        print("✅ Alle Touren sind zugeordnet.")
+    
+    # --- FLOTTEN-ZUSAMMENFASSUNG ---
+    print("\n" + "-" * 100)
+    print("🚗 FLOTTEN-ZUSAMMENFASSUNG")
+    print("-" * 100)
+    
+    n_elektro = 0
+    n_diesel = 0
+    aktive_lkw = 0
+    elektro_typen = {}
+    diesel_typen = {}
+    
+    for k in model.K:
+        hat_tour = any(pyo.value(model.a[r, k]) > 0.5 for r in model.R)
+        if hat_tour:
+            aktive_lkw += 1
+            for t in model.TE:
+                if pyo.value(model.type_assignment[k, t]) > 0.5:
+                    n_elektro += 1
+                    elektro_typen[t] = elektro_typen.get(t, 0) + 1
+                    break
+            for t in model.TD:
+                if pyo.value(model.type_assignment[k, t]) > 0.5:
+                    n_diesel += 1
+                    diesel_typen[t] = diesel_typen.get(t, 0) + 1
+                    break
+    
+    print(f"\nAktive LKWs gesamt:  {aktive_lkw}")
+    print(f"  davon Elektro:     {n_elektro} ({100*n_elektro/aktive_lkw:.1f} %)" if aktive_lkw > 0 else "")
+    for t, count in elektro_typen.items():
+        print(f"    - {t}: {count}")
+    print(f"  davon Diesel:      {n_diesel} ({100*n_diesel/aktive_lkw:.1f} %)" if aktive_lkw > 0 else "")
+    for t, count in diesel_typen.items():
+        print(f"    - {t}: {count}")
+    
+    # --- LKW-TYPEN UND TOUR-ZUORDNUNG (KOMPAKT) ---
+    print("\n" + "-" * 100)
+    print("🚛 LKW-TYPEN UND TOUR-ZUORDNUNG")
+    print("-" * 100)
+    
+    print(f"\n{'LKW':<6} {'Typ':<15} {'Kat.':<6} {'Touren':<8} {'km/Tag':<10} {'Touren-Details'}")
+    print("=" * 100)
+    
+    for k in sorted(model.K):
+        # Finde Typ
+        truck_type = None
+        typ_kat = None
+        for t in model.T:
+            if pyo.value(model.type_assignment[k, t]) > 0.5:
+                truck_type = t
+                typ_kat = "E" if t in model.TE else "D"
+                break
+        
+        # Finde ALLE Touren
+        tours = [r for r in model.R if pyo.value(model.a[r, k]) > 0.5]
+        
+        if tours:
+            total_km = sum(model.dist[r] for r in tours)
+            sorted_tours = sorted(tours, key=lambda x: model.s_r[x])
+            
+            # Touren-Details formatieren
+            tour_details = []
+            for r in sorted_tours:
+                start_h = (model.s_r[r]-1)*0.25
+                end_h = (model.e_r[r]-1)*0.25
+                tour_details.append(f"{r}({start_h:.1f}h-{end_h:.1f}h)")
+            
+            print(f"{k:<6} {truck_type:<15} [{typ_kat}]   {len(tours):<8} {total_km:<10} {', '.join(tour_details)}")
+    
+    # --- LADEINFRASTRUKTUR ---
+    print("\n" + "-" * 100)
+    print("⚡ LADEINFRASTRUKTUR")
+    print("-" * 100)
+    
+    total_chargers = 0
+    total_ladepunkte = 0
+    max_ladeleistung = 0
+    
+    print(f"\n{'Typ':<20} {'Anzahl':<10} {'Ladepunkte':<12} {'Max. Leistung':<15} {'Kosten/Jahr'}")
+    print("-" * 80)
+    
+    for l in model.L:
+        n = int(round(pyo.value(model.y_l[l])))
+        if n > 0:
+            total_chargers += n
+            punkte = n * model.cs_l[l]
+            leistung = n * model.max_p_l[l]
+            kosten = n * (model.cap_l[l] + model.opx_l[l])
+            total_ladepunkte += punkte
+            max_ladeleistung += leistung
+            print(f"{l:<20} {n:<10} {punkte:<12} {leistung:<12} kW  {kosten:>10,.0f} €")
+    
+    if total_chargers == 0:
+        print("Keine Ladesäulen installiert (reine Diesel-Flotte)")
+    else:
+        print("-" * 80)
+        print(f"{'GESAMT':<20} {total_chargers:<10} {total_ladepunkte:<12} {max_ladeleistung:<12} kW")
+    
+    # --- NETZ & SPEICHER ---
+    print("\n" + "-" * 100)
+    print("🔌 NETZ & SPEICHER")
+    print("-" * 100)
+    
+    trafo = pyo.value(model.u) > 0.5
+    peak = pyo.value(model.p_peak)
+    storage_p = pyo.value(model.p_s)
+    storage_q = pyo.value(model.q_s)
+    
+    basis_netz = pyo.value(model.p_grid_max)
+    erweiterung = 500 if trafo else 0
+    max_netz = basis_netz + erweiterung
+    
+    print(f"\nNetzanschluss:")
+    print(f"  Basis-Kapazität:           {basis_netz:.0f} kW")
+    print(f"  Trafo-Erweiterung:         {'JA (+500 kW, 10.000 €/Jahr)' if trafo else 'NEIN'}")
+    print(f"  MAX. NETZKAPAZITÄT:        {max_netz:.0f} kW")
+    print(f"  Tatsächliche Spitzenlast:  {peak:.2f} kW")
+    print(f"  Auslastung:                {100*peak/max_netz:.1f} %")
+    
+    print(f"\nSpeicher:")
+    if storage_p > 0.01 or storage_q > 0.01:
+        print(f"  Leistung:   {storage_p:.1f} kW")
+        print(f"  Kapazität:  {storage_q:.1f} kWh")
+    else:
+        print(f"  NICHT INSTALLIERT")
+    
+    # --- ZUSAMMENFASSUNG OPTIONEN ---
+    print("\n" + "-" * 100)
+    print("📋 ZUSAMMENFASSUNG INVESTITIONSENTSCHEIDUNGEN")
+    print("-" * 100)
+    
+    print(f"\n{'Option':<40} {'Entscheidung':<15} {'Jährliche Kosten'}")
+    print("=" * 80)
+    print(f"{'Trafo-Erweiterung (+500 kW)':<40} {'✅ JA' if trafo else '❌ NEIN':<15} {10000 if trafo else 0:>15,.0f} €")
+    
+    if storage_p > 0.01 or storage_q > 0.01:
+        storage_cost = (1 + pyo.value(model.opx_s)) * (pyo.value(model.capP_s) * storage_p + pyo.value(model.capQ_s) * storage_q)
+        print(f"{'Stationärer Speicher':<40} {'✅ JA':<15} {storage_cost:>15,.0f} €")
+    else:
+        print(f"{'Stationärer Speicher':<40} {'❌ NEIN':<15} {0:>15,.0f} €")
+    
+    if total_chargers > 0:
+        charger_cost = sum(pyo.value(model.y_l[l]) * (model.cap_l[l] + model.opx_l[l]) for l in model.L)
+        print(f"{'Ladeinfrastruktur':<40} {'✅ JA':<15} {charger_cost:>15,.0f} €")
+    else:
+        print(f"{'Ladeinfrastruktur':<40} {'❌ NEIN':<15} {0:>15,.0f} €")
+    
+    # ========================================================================
+    # AB HIER: DETAILLIERTE ANALYSE FÜR TEILAUFGABE 3
+    # ========================================================================
+    
+    print("\n" + "=" * 100)
+    print("DETAILLIERTE KOSTENANALYSE FÜR TEILAUFGABE 3")
+    print("=" * 100)
+    
+    # ========================================================================
+    # TEIL A: DETAILLIERTE KOSTENAUFSCHLÜSSELUNG
+    # ========================================================================
+    
+    print("\n" + "=" * 100)
+    print("TEIL A: KOSTENAUFSCHLÜSSELUNG")
+    print("=" * 100)
+    
+    # --- A1: DIESEL-LKW KOSTEN ---
+    print("\n" + "-" * 100)
+    print("A1: DIESEL-LKW KOSTEN (DETAILLIERT)")
+    print("-" * 100)
+    
+    diesel_lkw_liste = []
+    total_diesel_fix = 0
+    total_diesel_var = 0
+    
+    for k in sorted(model.K):
+        for t in model.TD:
+            if pyo.value(model.truck_type_used[k, t]) > 0.5:
+                # Fixkosten
+                cap = model.cap_d[t]
+                opx = model.opx_d[t]
+                kfz = model.kfz_d[t]
+                fix_gesamt = cap + opx + kfz
+                
+                # Variable Kosten (Touren dieses LKW)
+                touren_km = 0
+                touren_maut_km = 0
+                tour_liste = []
+                
+                for r in model.R:
+                    if pyo.value(model.a[r, k]) > 0.5:
+                        touren_km += model.dist[r]
+                        touren_maut_km += model.mDist[r]
+                        tour_liste.append(r)
+                
+                # Variable Kosten berechnen
+                kraftstoff_kosten = 260 * touren_km * model.avgDv_d[t] * model.c_diesel
+                maut_kosten = 260 * touren_maut_km * model.c_m_d
+                var_gesamt = kraftstoff_kosten + maut_kosten
+                
+                diesel_lkw_liste.append({
+                    'k': k, 't': t, 'touren': tour_liste,
+                    'km': touren_km, 'maut_km': touren_maut_km,
+                    'cap': cap, 'opx': opx, 'kfz': kfz, 'fix': fix_gesamt,
+                    'kraftstoff': kraftstoff_kosten, 'maut': maut_kosten, 'var': var_gesamt
+                })
+                
+                total_diesel_fix += fix_gesamt
+                total_diesel_var += var_gesamt
+    
+    if diesel_lkw_liste:
+        print(f"\n{'LKW':<6} {'Typ':<12} {'Touren':<25} {'km/Tag':<10} {'Maut-km':<10}")
+        print(f"{'':6} {'CAPEX':<12} {'OPEX':<12} {'Kfz-St.':<12} {'Fix ges.':<12}")
+        print(f"{'':6} {'Kraftstoff':<15} {'Maut':<15} {'Var. ges.':<15}")
+        print("=" * 100)
+        
+        for d in diesel_lkw_liste:
+            print(f"\nLKW {d['k']:<3} {d['t']:<12} {str(d['touren']):<25} {d['km']:<10} {d['maut_km']:<10}")
+            print(f"{'':6} {d['cap']:>10,.0f} € {d['opx']:>10,.0f} € {d['kfz']:>10,.0f} € {d['fix']:>10,.0f} €")
+            print(f"{'':6} {d['kraftstoff']:>13,.2f} € {d['maut']:>13,.2f} € {d['var']:>13,.2f} €")
+        
+        print("\n" + "-" * 50)
+        print(f"SUMME DIESEL-LKW FIXKOSTEN:      {total_diesel_fix:>15,.2f} €/Jahr")
+        print(f"SUMME DIESEL-LKW VARIABLE:       {total_diesel_var:>15,.2f} €/Jahr")
+        print(f"SUMME DIESEL-LKW GESAMT:         {total_diesel_fix + total_diesel_var:>15,.2f} €/Jahr")
+    else:
+        print("Keine Diesel-LKW in der Lösung.")
+    
+    # --- A2: ELEKTRO-LKW KOSTEN ---
+    print("\n" + "-" * 100)
+    print("A2: ELEKTRO-LKW KOSTEN (DETAILLIERT)")
+    print("-" * 100)
+    
+    elektro_lkw_liste = []
+    total_elektro_fix = 0
+    total_thg_erloes = 0
+    
+    for k in sorted(model.K):
+        for t in model.TE:
+            if pyo.value(model.truck_type_used[k, t]) > 0.5:
+                # Fixkosten
+                cap = model.cap_e[t]
+                opx = model.opx_e[t]
+                thg = model.thg_e[t]
+                fix_gesamt = cap + opx
+                
+                # Touren dieses LKW
+                touren_km = 0
+                tour_liste = []
+                energie_verbrauch_tag = 0
+                
+                for r in model.R:
+                    if pyo.value(model.a[r, k]) > 0.5:
+                        touren_km += model.dist[r]
+                        tour_liste.append(r)
+                        energie_verbrauch_tag += model.dist[r] * model.avgEv_e[t]
+                
+                # Energieverbrauch pro Jahr
+                energie_jahr = 260 * energie_verbrauch_tag
+                
+                elektro_lkw_liste.append({
+                    'k': k, 't': t, 'touren': tour_liste,
+                    'km': touren_km, 'cap': cap, 'opx': opx, 
+                    'fix': fix_gesamt, 'thg': thg,
+                    'energie_tag': energie_verbrauch_tag,
+                    'energie_jahr': energie_jahr,
+                    'batterie': model.soc_e[t]
+                })
+                
+                total_elektro_fix += fix_gesamt
+                total_thg_erloes += thg
+    
+    if elektro_lkw_liste:
+        print(f"\n{'LKW':<6} {'Typ':<15} {'Batterie':<12} {'Touren':<25} {'km/Tag':<10}")
+        print(f"{'':6} {'CAPEX':<15} {'OPEX':<15} {'Fix ges.':<15} {'THG-Erlös':<12}")
+        print(f"{'':6} {'kWh/Tag':<15} {'kWh/Jahr':<15}")
+        print("=" * 100)
+        
+        for e in elektro_lkw_liste:
+            print(f"\nLKW {e['k']:<3} {e['t']:<15} {e['batterie']:<10} kWh {str(e['touren']):<25} {e['km']:<10}")
+            print(f"{'':6} {e['cap']:>13,.0f} € {e['opx']:>13,.0f} € {e['fix']:>13,.0f} € {e['thg']:>10,.0f} €")
+            print(f"{'':6} {e['energie_tag']:>13,.1f}    {e['energie_jahr']:>13,.1f}")
+        
+        print("\n" + "-" * 50)
+        print(f"SUMME E-LKW FIXKOSTEN:           {total_elektro_fix:>15,.2f} €/Jahr")
+        print(f"SUMME THG-ERLÖSE:               -{total_thg_erloes:>15,.2f} €/Jahr")
+        print(f"SUMME E-LKW NETTO:               {total_elektro_fix - total_thg_erloes:>15,.2f} €/Jahr")
+    else:
+        print("Keine Elektro-LKW in der Lösung.")
+    
+    # --- A3: LADEINFRASTRUKTUR KOSTEN ---
+    print("\n" + "-" * 100)
+    print("A3: LADEINFRASTRUKTUR KOSTEN")
+    print("-" * 100)
+    
+    total_lade_kosten = 0
+    
+    print(f"\n{'Ladesäulentyp':<20} {'Anzahl':<10} {'CAPEX/Stk':<12} {'OPEX/Stk':<12} {'Gesamt':<15}")
+    print("=" * 80)
+    
+    for l in model.L:
+        n = int(round(pyo.value(model.y_l[l])))
+        if n > 0:
+            cap_l = model.cap_l[l]
+            opx_l = model.opx_l[l]
+            gesamt = n * (cap_l + opx_l)
+            total_lade_kosten += gesamt
+            print(f"{l:<20} {n:<10} {cap_l:>10,.0f} € {opx_l:>10,.0f} € {gesamt:>13,.0f} €")
+    
+    if total_lade_kosten == 0:
+        print("Keine Ladesäulen installiert.")
+    else:
+        print("-" * 80)
+        print(f"{'SUMME LADEINFRASTRUKTUR:':<54} {total_lade_kosten:>13,.0f} €/Jahr")
+    
+    # --- A4: NETZ- UND STROMKOSTEN ---
+    print("\n" + "-" * 100)
+    print("A4: NETZ- UND STROMKOSTEN")
+    print("-" * 100)
+    
+    # Grundgebühr
+    grundgebuehr = pyo.value(model.c_gr)
+    
+    # Leistungspreis
+    peak = pyo.value(model.p_peak)
+    leistungskosten = pyo.value(model.cPeak) * peak
+    
+    # Arbeitspreis (Energiekosten)
+    energie_bezug_tag = sum(pyo.value(model.p_grid[z]) * model.delta_t for z in model.Z)
+    energie_bezug_jahr = 260 * energie_bezug_tag
+    arbeitskosten = energie_bezug_jahr * pyo.value(model.c_e)
+    
+    # Trafo-Erweiterung
+    trafo = pyo.value(model.u) > 0.5
+    trafo_kosten = 10000 if trafo else 0
+    
+    total_strom = grundgebuehr + leistungskosten + arbeitskosten + trafo_kosten
+    
+    print(f"\n{'Komponente':<40} {'Wert':<20} {'Kosten':<15}")
+    print("=" * 80)
+    print(f"{'Grundgebühr':<40} {'-':<20} {grundgebuehr:>13,.2f} €")
+    print(f"{'Leistungspreis':<40} {peak:>10,.2f} kW × 150 €/kW {leistungskosten:>13,.2f} €")
+    print(f"{'Arbeitspreis':<40} {energie_bezug_jahr:>10,.1f} kWh × 0.25 € {arbeitskosten:>13,.2f} €")
+    print(f"{'Trafo-Erweiterung':<40} {'JA' if trafo else 'NEIN':<20} {trafo_kosten:>13,.2f} €")
+    print("-" * 80)
+    print(f"{'SUMME STROMKOSTEN:':<60} {total_strom:>13,.2f} €/Jahr")
+    
+    print(f"\n  Energiebezug pro Tag:  {energie_bezug_tag:>10,.2f} kWh")
+    print(f"  Energiebezug pro Jahr: {energie_bezug_jahr:>10,.2f} kWh")
+    print(f"  Spitzenlast:           {peak:>10,.2f} kW")
+    
+    # --- A5: SPEICHERKOSTEN ---
+    print("\n" + "-" * 100)
+    print("A5: SPEICHERKOSTEN")
+    print("-" * 100)
+    
+    storage_p = pyo.value(model.p_s)
+    storage_q = pyo.value(model.q_s)
+    
+    if storage_p > 0.01 or storage_q > 0.01:
+        capex_p = model.capP_s * storage_p
+        capex_q = model.capQ_s * storage_q
+        opex_s = model.opx_s * (capex_p + capex_q)
+        total_speicher = capex_p + capex_q + opex_s
+        
+        print(f"\n{'Komponente':<40} {'Wert':<20} {'Kosten':<15}")
+        print("=" * 80)
+        print(f"{'Leistung (CAPEX)':<40} {storage_p:>10,.1f} kW × 30 €/kW {capex_p:>13,.2f} €")
+        print(f"{'Kapazität (CAPEX)':<40} {storage_q:>10,.1f} kWh × 350 €/kWh {capex_q:>13,.2f} €")
+        print(f"{'OPEX (2%)':<40} {'-':<20} {opex_s:>13,.2f} €")
+        print("-" * 80)
+        print(f"{'SUMME SPEICHER:':<60} {total_speicher:>13,.2f} €/Jahr")
+    else:
+        total_speicher = 0
+        print("\nKein Speicher installiert.")
+        print(f"{'SUMME SPEICHER:':<60} {total_speicher:>13,.2f} €/Jahr")
+    
+    # --- A6: GESAMTKOSTENÜBERSICHT ---
+    print("\n" + "=" * 100)
+    print("A6: GESAMTKOSTENÜBERSICHT")
+    print("=" * 100)
+    
+    print(f"\n{'KOSTENPOSITION':<50} {'BETRAG':<20}")
+    print("=" * 70)
+    print(f"{'Diesel-LKW Fixkosten':<50} {total_diesel_fix:>18,.2f} €")
+    print(f"{'Diesel-LKW Variable Kosten':<50} {total_diesel_var:>18,.2f} €")
+    print(f"{'Elektro-LKW Fixkosten':<50} {total_elektro_fix:>18,.2f} €")
+    print(f"{'THG-Quotenerlöse':<50} {-total_thg_erloes:>18,.2f} €")
+    print(f"{'Ladeinfrastruktur':<50} {total_lade_kosten:>18,.2f} €")
+    print(f"{'Stromkosten (Grund+Arbeit+Leistung)':<50} {total_strom - trafo_kosten:>18,.2f} €")
+    print(f"{'Trafo-Erweiterung':<50} {trafo_kosten:>18,.2f} €")
+    print(f"{'Speicher':<50} {total_speicher:>18,.2f} €")
+    print("-" * 70)
+    
+    berechnete_summe = (total_diesel_fix + total_diesel_var + total_elektro_fix 
+                        - total_thg_erloes + total_lade_kosten + total_strom + total_speicher)
+    
+    print(f"{'BERECHNETE GESAMTKOSTEN':<50} {berechnete_summe:>18,.2f} €")
+    print(f"{'ZIELFUNKTIONSWERT (SOLVER)':<50} {pyo.value(model.obj):>18,.2f} €")
+    print(f"{'DIFFERENZ':<50} {berechnete_summe - pyo.value(model.obj):>18,.2f} €")
+    
+    # Prozentuale Aufteilung
+    print("\n" + "-" * 70)
+    print("PROZENTUALE KOSTENAUFTEILUNG:")
+    print("-" * 70)
+    
+    gesamt = pyo.value(model.obj)
+    
+    print(f"  Diesel-LKW (Fix + Var):    {100*(total_diesel_fix + total_diesel_var)/gesamt:>6.1f} %")
+    print(f"  Elektro-LKW (Fix - THG):   {100*(total_elektro_fix - total_thg_erloes)/gesamt:>6.1f} %")
+    print(f"  Ladeinfrastruktur:         {100*total_lade_kosten/gesamt:>6.1f} %")
+    print(f"  Stromkosten:               {100*total_strom/gesamt:>6.1f} %")
+    print(f"  Speicher:                  {100*total_speicher/gesamt:>6.1f} %")
+    
+    # ========================================================================
+    # TEIL B: DETAILLIERTE LADEPLANUNG
+    # ========================================================================
+    
+    print("\n" + "=" * 100)
+    print("TEIL B: DETAILLIERTE LADEPLANUNG PRO ELEKTRO-LKW")
+    print("=" * 100)
+    
+    def zeit_format(z):
+        """Konvertiert Zeitintervall z (1-96) in Uhrzeit HH:MM"""
+        minuten = (z - 1) * 15
+        stunden = minuten // 60
+        mins = minuten % 60
+        return f"{stunden:02d}:{mins:02d}"
+    
+    for e_data in elektro_lkw_liste:
+        k = e_data['k']
+        t = e_data['t']
+        
+        print("\n" + "=" * 100)
+        print(f"ELEKTRO-LKW {k} | Typ: {t} | Batterie: {e_data['batterie']} kWh")
+        print("=" * 100)
+        
+        # Touren dieses LKW
+        print(f"\n--- TOUREN ---")
+        touren_details = []
+        for r in model.R:
+            if pyo.value(model.a[r, k]) > 0.5:
+                start_z = model.s_r[r]
+                end_z = model.e_r[r]
+                dist = model.dist[r]
+                verbrauch = dist * model.avgEv_e[t]
+                touren_details.append({
+                    'r': r, 'start_z': start_z, 'end_z': end_z,
+                    'start_zeit': zeit_format(start_z), 'end_zeit': zeit_format(end_z),
+                    'dist': dist, 'verbrauch': verbrauch
+                })
+        
+        touren_details.sort(key=lambda x: x['start_z'])
+        
+        print(f"{'Tour':<10} {'Abfahrt':<10} {'Ankunft':<10} {'Distanz':<12} {'Verbrauch':<15}")
+        print("-" * 60)
+        total_verbrauch = 0
+        for td in touren_details:
+            print(f"{td['r']:<10} {td['start_zeit']:<10} {td['end_zeit']:<10} {td['dist']:>8} km   {td['verbrauch']:>10.1f} kWh")
+            total_verbrauch += td['verbrauch']
+        print("-" * 60)
+        print(f"{'GESAMT':<10} {'':<10} {'':<10} {e_data['km']:>8} km   {total_verbrauch:>10.1f} kWh")
+        
+        # SOC-Verlauf
+        print(f"\n--- SOC-VERLAUF (LADEZUSTAND) ---")
+        
+        # Sammle relevante SOC-Werte (Änderungen)
+        soc_events = []
+        prev_soc = None
+        
+        for z in model.Z:
+            current_soc = pyo.value(model.soc[k, z])
+            
+            # Prüfe ob Tour startet oder endet
+            tour_start = None
+            tour_end = None
+            for r in model.R:
+                if pyo.value(model.a[r, k]) > 0.5:
+                    if model.s_r[r] == z:
+                        tour_start = r
+                    if model.e_r[r] == z:
+                        tour_end = r
+            
+            # Prüfe ob geladen wird
+            lade_leistung = sum(pyo.value(model.real_p[k, l, z]) for l in model.L)
+            
+            # Event aufzeichnen wenn etwas passiert
+            if tour_start or tour_end or lade_leistung > 0.1 or prev_soc is None or abs(current_soc - prev_soc) > 0.5:
+                event = {
+                    'z': z, 'zeit': zeit_format(z), 'soc': current_soc,
+                    'tour_start': tour_start, 'tour_end': tour_end,
+                    'lade_leistung': lade_leistung
+                }
+                soc_events.append(event)
+            
+            prev_soc = current_soc
+        
+        # Ausgabe SOC-Verlauf (nur wichtige Events)
+        print(f"{'Zeit':<8} {'SOC (kWh)':<12} {'SOC %':<10} {'Ereignis':<40}")
+        print("-" * 80)
+        
+        batterie_kap = e_data['batterie']
+        
+        for ev in soc_events:
+            soc_pct = 100 * ev['soc'] / batterie_kap if batterie_kap > 0 else 0
+            
+            ereignis = ""
+            if ev['tour_start']:
+                ereignis = f"🚚 ABFAHRT Tour {ev['tour_start']}"
+            elif ev['tour_end']:
+                ereignis = f"🏁 ANKUNFT von Tour {ev['tour_end']}"
+            elif ev['lade_leistung'] > 0.1:
+                ereignis = f"⚡ Laden mit {ev['lade_leistung']:.1f} kW"
+            
+            if ereignis or ev == soc_events[0] or ev == soc_events[-1]:
+                print(f"{ev['zeit']:<8} {ev['soc']:>10.1f}    {soc_pct:>6.1f} %   {ereignis}")
+        
+        # Ladevorgänge detailliert
+        print(f"\n--- LADEVORGÄNGE DETAILLIERT ---")
+        
+        lade_sessions = []
+        aktuelle_session = None
+        
+        for z in model.Z:
+            lade_leistung = sum(pyo.value(model.real_p[k, l, z]) for l in model.L)
+            ladesaeule = None
+            for l in model.L:
+                if pyo.value(model.real_p[k, l, z]) > 0.1:
+                    ladesaeule = l
+                    break
+            
+            if lade_leistung > 0.1:
+                if aktuelle_session is None:
+                    aktuelle_session = {
+                        'start_z': z, 'end_z': z,
+                        'ladesaeule': ladesaeule,
+                        'leistungen': [lade_leistung],
+                        'energie': lade_leistung * 0.25,
+                        'soc_start': pyo.value(model.soc[k, z])
+                    }
+                else:
+                    aktuelle_session['end_z'] = z
+                    aktuelle_session['leistungen'].append(lade_leistung)
+                    aktuelle_session['energie'] += lade_leistung * 0.25
+            else:
+                if aktuelle_session is not None:
+                    aktuelle_session['soc_end'] = pyo.value(model.soc[k, aktuelle_session['end_z']])
+                    lade_sessions.append(aktuelle_session)
+                    aktuelle_session = None
+        
+        # Letzte Session abschließen
+        if aktuelle_session is not None:
+            aktuelle_session['soc_end'] = pyo.value(model.soc[k, aktuelle_session['end_z']])
+            lade_sessions.append(aktuelle_session)
+        
+        if lade_sessions:
+            print(f"{'#':<4} {'Start':<8} {'Ende':<8} {'Dauer':<10} {'Säule':<18} {'Ø kW':<10} {'kWh':<10} {'SOC vorher':<12} {'SOC nachher':<12}")
+            print("-" * 110)
+            
+            total_energie_geladen = 0
+            for i, session in enumerate(lade_sessions, 1):
+                dauer_intervalle = session['end_z'] - session['start_z'] + 1
+                dauer_minuten = dauer_intervalle * 15
+                dauer_str = f"{dauer_minuten} min"
+                avg_leistung = sum(session['leistungen']) / len(session['leistungen'])
+                
+                soc_vorher_pct = 100 * session['soc_start'] / batterie_kap
+                soc_nachher_pct = 100 * session['soc_end'] / batterie_kap
+                
+                print(f"{i:<4} {zeit_format(session['start_z']):<8} {zeit_format(session['end_z']):<8} "
+                      f"{dauer_str:<10} {session['ladesaeule'] or 'N/A':<18} "
+                      f"{avg_leistung:>8.1f}  {session['energie']:>8.1f}  "
+                      f"{soc_vorher_pct:>8.1f} %   {soc_nachher_pct:>8.1f} %")
+                
+                total_energie_geladen += session['energie']
+            
+            print("-" * 110)
+            print(f"GESAMT GELADEN: {total_energie_geladen:.1f} kWh | VERBRAUCHT: {total_verbrauch:.1f} kWh | DIFFERENZ: {total_energie_geladen - total_verbrauch:.1f} kWh")
+        else:
+            print("Keine Ladevorgänge für diesen LKW.")
+        
+        # Zusammenfassung für diesen LKW
+        print(f"\n--- ZUSAMMENFASSUNG LKW {k} ---")
+        
+        soc_start = pyo.value(model.soc[k, 1])
+        soc_min = min(pyo.value(model.soc[k, z]) for z in model.Z)
+        soc_max = max(pyo.value(model.soc[k, z]) for z in model.Z)
+        
+        print(f"  SOC zu Tagesbeginn:    {soc_start:>8.1f} kWh ({100*soc_start/batterie_kap:>5.1f} %)")
+        print(f"  SOC Minimum (Tag):     {soc_min:>8.1f} kWh ({100*soc_min/batterie_kap:>5.1f} %)")
+        print(f"  SOC Maximum (Tag):     {soc_max:>8.1f} kWh ({100*soc_max/batterie_kap:>5.1f} %)")
+        print(f"  Tagesverbrauch:        {total_verbrauch:>8.1f} kWh")
+        print(f"  Reichweite Batterie:   {batterie_kap / model.avgEv_e[t]:>8.0f} km")
+        print(f"  Gefahrene km:          {e_data['km']:>8} km")
+        print(f"  Reichweiten-Reserve:   {100 - 100*e_data['km']/(batterie_kap / model.avgEv_e[t]):>8.1f} %")
+    
+    # ========================================================================
+    # TEIL C: GLOBALE LADEÜBERSICHT
+    # ========================================================================
+    
+    print("\n" + "=" * 100)
+    print("TEIL C: GLOBALE LADEÜBERSICHT (ALLE E-LKW)")
+    print("=" * 100)
+    
+    # Stündliche Zusammenfassung
+    print(f"\n--- STÜNDLICHE NETZLAST UND LADUNG ---")
+    print(f"{'Stunde':<10} {'Netzlast (kW)':<15} {'Ladende LKW':<15} {'Aktive Säulen':<15}")
+    print("-" * 60)
+    
+    for h in range(24):
+        z_start = h * 4 + 1
+        z_end = z_start + 3
+        
+        # Durchschnittliche Netzlast in dieser Stunde
+        netzlast_avg = sum(pyo.value(model.p_grid[z]) for z in range(z_start, min(z_end+1, 97))) / 4
+        
+        # Ladende LKW zählen
+        ladende_lkw = set()
+        aktive_saeulen = set()
+        
+        for z in range(z_start, min(z_end+1, 97)):
+            for k in model.K:
+                for l in model.L:
+                    if pyo.value(model.real_p[k, l, z]) > 0.1:
+                        ladende_lkw.add(k)
+                        aktive_saeulen.add(l)
+        
+        if netzlast_avg > 0.1 or ladende_lkw:
+            print(f"{h:02d}:00     {netzlast_avg:>12.1f}     {len(ladende_lkw):>10}        {len(aktive_saeulen):>10}")
+    
+    # Spitzenlast-Analyse
+    print(f"\n--- SPITZENLAST-ANALYSE ---")
+    
+    peak_z = None
+    peak_val = 0
+    for z in model.Z:
+        val = pyo.value(model.p_grid[z])
+        if val > peak_val:
+            peak_val = val
+            peak_z = z
+    
+    if peak_z:
+        print(f"\nSpitzenlast tritt auf um: {zeit_format(peak_z)} mit {peak_val:.2f} kW")
+        print(f"\nZu diesem Zeitpunkt laden:")
+        
+        for k in model.K:
+            for l in model.L:
+                p = pyo.value(model.real_p[k, l, peak_z])
+                if p > 0.1:
+                    print(f"  - LKW {k} an {l}: {p:.1f} kW")
+    
+    # ========================================================================
+    # TEIL D: DIESEL-LKW BETRIEBSDETAILS
+    # ========================================================================
+    
+    print("\n" + "=" * 100)
+    print("TEIL D: DIESEL-LKW BETRIEBSDETAILS")
+    print("=" * 100)
+    
+    for d_data in diesel_lkw_liste:
+        k = d_data['k']
+        print(f"\n--- DIESEL-LKW {k} | Typ: {d_data['t']} ---")
+        
+        print(f"{'Tour':<10} {'Abfahrt':<10} {'Ankunft':<10} {'Distanz':<12} {'Maut-km':<12} {'Diesel (l)':<12}")
+        print("-" * 70)
+        
+        total_diesel_l = 0
+        for r in model.R:
+            if pyo.value(model.a[r, k]) > 0.5:
+                start_zeit = zeit_format(model.s_r[r])
+                end_zeit = zeit_format(model.e_r[r])
+                dist = model.dist[r]
+                maut_dist = model.mDist[r]
+                diesel_l = dist * model.avgDv_d[d_data['t']]
+                total_diesel_l += diesel_l
+                
+                print(f"{r:<10} {start_zeit:<10} {end_zeit:<10} {dist:>8} km   {maut_dist:>8} km   {diesel_l:>10.1f}")
+        
+        print("-" * 70)
+        print(f"{'GESAMT':<10} {'':<10} {'':<10} {d_data['km']:>8} km   {d_data['maut_km']:>8} km   {total_diesel_l:>10.1f}")
+        print(f"\nJährlicher Dieselverbrauch: {260 * total_diesel_l:,.0f} Liter")
+        print(f"Jährliche Dieselkosten:     {260 * total_diesel_l * model.c_diesel:,.2f} €")
+        print(f"Jährliche Mautkosten:       {260 * d_data['maut_km'] * model.c_m_d:,.2f} €")
+    
+    # ========================================================================
+    # TEIL E: VERGLEICHSANALYSE E-LKW vs DIESEL
+    # ========================================================================
+    
+    print("\n" + "=" * 100)
+    print("TEIL E: VERGLEICHSANALYSE ELEKTRO vs. DIESEL")
+    print("=" * 100)
+    
+    # Kosten pro km Vergleich
+    print(f"\n--- KOSTEN PRO KILOMETER ---")
+    print(f"{'LKW':<8} {'Typ':<15} {'km/Jahr':<12} {'Fixkosten':<15} {'Var.kosten':<15} {'Gesamt':<15} {'€/km':<10}")
+    print("=" * 100)
+    
+    alle_lkw_analyse = []
+    
+    for d_data in diesel_lkw_liste:
+        km_jahr = 260 * d_data['km']
+        fix = d_data['fix']
+        var = d_data['var']
+        gesamt = fix + var
+        pro_km = gesamt / km_jahr if km_jahr > 0 else 0
+        
+        alle_lkw_analyse.append({
+            'k': d_data['k'], 'typ': d_data['t'], 'kategorie': 'Diesel',
+            'km_jahr': km_jahr, 'fix': fix, 'var': var, 'gesamt': gesamt, 'pro_km': pro_km
+        })
+        
+        print(f"LKW {d_data['k']:<4} {d_data['t']:<15} {km_jahr:>10,}   {fix:>13,.0f} € {var:>13,.0f} € {gesamt:>13,.0f} € {pro_km:>8.2f}")
+    
+    for e_data in elektro_lkw_liste:
+        km_jahr = 260 * e_data['km']
+        fix = e_data['fix'] - e_data['thg']  # Netto (minus THG)
+        
+        # Variable Kosten = anteiliger Strom (approximiert)
+        energie_anteil = e_data['energie_jahr']
+        var = energie_anteil * pyo.value(model.c_e)  # Nur Arbeitspreis
+        
+        gesamt = fix + var
+        pro_km = gesamt / km_jahr if km_jahr > 0 else 0
+        
+        alle_lkw_analyse.append({
+            'k': e_data['k'], 'typ': e_data['t'], 'kategorie': 'Elektro',
+            'km_jahr': km_jahr, 'fix': fix, 'var': var, 'gesamt': gesamt, 'pro_km': pro_km
+        })
+        
+        print(f"LKW {e_data['k']:<4} {e_data['t']:<15} {km_jahr:>10,}   {fix:>13,.0f} € {var:>13,.0f} € {gesamt:>13,.0f} € {pro_km:>8.2f}")
+    
+    # Durchschnitte
+    print("\n" + "-" * 100)
+    
+    diesel_lkws = [a for a in alle_lkw_analyse if a['kategorie'] == 'Diesel']
+    elektro_lkws = [a for a in alle_lkw_analyse if a['kategorie'] == 'Elektro']
+    
+    if diesel_lkws:
+        avg_diesel = sum(a['pro_km'] for a in diesel_lkws) / len(diesel_lkws)
+        print(f"Ø Diesel-LKW:        {avg_diesel:.2f} €/km")
+    
+    if elektro_lkws:
+        avg_elektro = sum(a['pro_km'] for a in elektro_lkws) / len(elektro_lkws)
+        print(f"Ø Elektro-LKW:       {avg_elektro:.2f} €/km (ohne anteilige Infrastruktur)")
+    
+    print("\n" + "=" * 100)
+    print("ANALYSE ABGESCHLOSSEN")
+    print("=" * 100)
     # ZIELFUNKTIONSWERT
     print("-" * 80)
     print("📊 ZIELFUNKTIONSWERT")
