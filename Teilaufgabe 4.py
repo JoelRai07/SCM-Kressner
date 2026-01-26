@@ -114,7 +114,21 @@ model.kfz_d = pyo.Param(model.TD, initialize={'ActrosL': 556})
 model.avgDv_d = pyo.Param(model.TD, initialize={'ActrosL': 0.26})
 model.c_diesel = pyo.Param(initialize=1.5)
 model.c_m_d = pyo.Param(initialize=0.34)
- 
+
+# ============================================================================
+# ERWEITERUNG 1: CO₂-MAUT-AUFSCHLAG (basierend auf co2_emission_class aus CSV)
+# ============================================================================
+# Aufschläge pro CO₂-Emissionsklasse (€/km, Stand 2024)
+co2_maut_aufschlag = {
+    1: 0.158,  # Schlechteste Klasse
+    2: 0.142,
+    3: 0.126,
+    4: 0.079,
+    5: 0.000   # Beste Klasse
+}
+
+model.c_co2_maut = pyo.Param(model.TD, initialize={'ActrosL': co2_maut_aufschlag[1]})
+
 # --- Elektro-LKW-Parameter ---
  
 model.cap_e = pyo.Param(model.TE, initialize={'eActros600': 60000, 'eActros400': 50000})
@@ -149,13 +163,28 @@ model.capQ_s = pyo.Param(initialize=350)
 model.opx_s = pyo.Param(initialize=0.02)
 model.nrt = pyo.Param(initialize=0.98)
 model.dod = pyo.Param(initialize=0.025)
-model.c_e = pyo.Param(initialize=0.25)
+# ============================================================================
+# ERWEITERUNG 2: ZEITVARIABLE STROMPREISE (HT/NT-Tarif)
+# ============================================================================
+HT_PREIS = 0.27  # €/kWh Hochtarif (06:00-22:00) - HIER ÄNDERN!
+NT_PREIS = 0.22  # €/kWh Niedrigtarif (22:00-06:00) - HIER ÄNDERN!
+
+def c_e_init(model, z):
+    # z=25 entspricht 06:00, z=88 entspricht 21:45
+    if 25 <= z <= 88:  # 06:00 - 22:00 (Hochtarif)
+        return HT_PREIS
+    else:              # 22:00 - 06:00 (Niedrigtarif)
+        return NT_PREIS
+
+model.c_e = pyo.Param(model.Z, initialize=c_e_init)
 model.c_gr = pyo.Param(initialize=1000)
 model.cPeak = pyo.Param(initialize=150)
 model.Nmax = pyo.Param(initialize=3)
 model.delta_t = pyo.Param(initialize=0.25)
 
 model.z6 = pyo.Param(initialize=25)
+
+
  
 def unplug_ok_init(model, z):
     if z in model.Z_day:
@@ -165,7 +194,44 @@ def unplug_ok_init(model, z):
     else:
         return 0
 model.unplug_ok = pyo.Param(model.Z, initialize=unplug_ok_init)
- 
+
+# --- PV-Anlage ---
+model.p_pv_cap = pyo.Var(domain=pyo.NonNegativeReals, bounds=(0, 500))  # Installierte PV-Leistung kWp
+
+# ============================================================================
+# ERWEITERUNG 3: PV-ANLAGE
+# ============================================================================
+
+model.capex_pv = pyo.Param(initialize=70) #jährliche Kosten, runtergerechnet Instandhaltung, anschaffungskosten usw.. pro KW (Groesse)
+
+# PV-Erzeugungsprofil (normiert 0-1, typischer Sommertag)
+def pv_profile_init(model, z):
+    hour = (z - 1) * 0.25  # Intervall z in Stunden umrechnen
+    if hour < 6 or hour >= 20:      # Nacht: keine Erzeugung
+        return 0.0
+    elif 6 <= hour < 8:             # Sonnenaufgang
+        return (hour - 6) / 2 * 0.4
+    elif 8 <= hour < 10:            # Vormittag früh
+        return 0.4 + (hour - 8) / 2 * 0.3
+    elif 10 <= hour < 12:           # Vormittag spät
+        return 0.7 + (hour - 10) / 2 * 0.3
+    elif 12 <= hour < 14:           # Mittag (Maximum)
+        return 1.0
+    elif 14 <= hour < 16:           # Nachmittag früh
+        return 1.0 - (hour - 14) / 2 * 0.2
+    elif 16 <= hour < 18:           # Nachmittag spät
+        return 0.8 - (hour - 16) / 2 * 0.4
+    elif 18 <= hour < 20:           # Sonnenuntergang
+        return 0.4 - (hour - 18) / 2 * 0.4
+    else:
+        return 0.0
+
+model.pv_profile = pyo.Param(model.Z, initialize=pv_profile_init)
+
+# PV-Erzeugung pro Zeitintervall
+def p_pv_rule(model, z):
+    return model.p_pv_cap * model.pv_profile[z]
+model.p_pv = pyo.Expression(model.Z, rule=p_pv_rule)
 # ============================================================================
 # 3️⃣ ENTSCHEIDUNGSVARIABLEN
 # ============================================================================
@@ -371,7 +437,7 @@ model.con_charger_power_capacity = pyo.Constraint(model.L, model.Z, rule=charger
  
 def grid_balance_rule(model, z):
     return (model.p_grid[z] == sum(model.real_p[k, l, z] for k in model.K for l in model.L) +
-            model.p_l_s[z] - model.p_e_s[z])
+            model.p_l_s[z] - model.p_e_s[z] - model.p_pv[z])
 model.con_grid_balance = pyo.Constraint(model.Z, rule=grid_balance_rule)
  
 def grid_limit_rule(model, z):
@@ -435,21 +501,23 @@ def objective_rule(model):
     
     C_storage = (1 + model.opx_s) * (model.capP_s * model.p_s + model.capQ_s * model.q_s)
     
+    # ERWEITERUNG 1: CO₂-Maut-Aufschlag hinzugefügt
     C_diesel_var = 260 * sum(
-        model.a_type[r, k, t] * (model.c_m_d * model.mDist[r] +
+        model.a_type[r, k, t] * ((model.c_m_d + model.c_co2_maut[t]) * model.mDist[r] +
                                   model.c_diesel * (model.dist[r]) * model.avgDv_d[t])
         for r in model.R for k in model.K for t in model.TD
     )
     
     C_electricity = model.c_gr + model.cPeak * model.p_peak + \
-                    260 * model.c_e * sum(model.p_grid[z] * model.delta_t for z in model.Z)
+                    260 * sum(model.c_e[z] * model.p_grid[z] * model.delta_t for z in model.Z)
     
     C_revenue = sum(
         sum(model.truck_type_used[k, t] * model.thg_e[t] for t in model.TE)
         for k in model.K
     )
-    
-    return C_trucks + C_chargers + C_grid_trafo + C_storage + C_diesel_var + C_electricity - C_revenue
+    # ERWEITERUNG 3: PV-Anlage Kosten
+    C_pv = model.capex_pv * model.p_pv_cap
+    return C_trucks + C_chargers + C_grid_trafo + C_storage + C_diesel_var + C_electricity - C_revenue + C_pv
 
 model.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 # ============================================================================
@@ -762,7 +830,13 @@ if solution_found:
         print(f"{'Ladeinfrastruktur':<40} {'✅ JA':<15} {charger_cost:>15,.0f} €")
     else:
         print(f"{'Ladeinfrastruktur':<40} {'❌ NEIN':<15} {0:>15,.0f} €")
-    
+    # PV-Anlage in Zusammenfassung
+    pv_cap = pyo.value(model.p_pv_cap)
+    if pv_cap > 0.01:
+        pv_cost = pyo.value(model.capex_pv) * pv_cap
+        print(f"{'PV-Anlage':<40} {'✅ JA':<15} {pv_cap:>10,.1f} kWp, Kosten: {pv_cost:>,.0f} €/Jahr")
+    else:
+        print(f"{'PV-Anlage':<40} {'❌ NEIN':<15} 0 kWp")
     # ========================================================================
     # AB HIER: DETAILLIERTE ANALYSE FÜR TEILAUFGABE 3
     # ========================================================================
@@ -810,7 +884,7 @@ if solution_found:
                 
                 # Variable Kosten berechnen
                 kraftstoff_kosten = 260 * touren_km * model.avgDv_d[t] * model.c_diesel
-                maut_kosten = 260 * touren_maut_km * model.c_m_d
+                maut_kosten = 260 * touren_maut_km * (model.c_m_d + model.c_co2_maut[t])
                 var_gesamt = kraftstoff_kosten + maut_kosten
                 
                 diesel_lkw_liste.append({
@@ -943,7 +1017,9 @@ if solution_found:
     # Arbeitspreis (Energiekosten)
     energie_bezug_tag = sum(pyo.value(model.p_grid[z]) * model.delta_t for z in model.Z)
     energie_bezug_jahr = 260 * energie_bezug_tag
-    arbeitskosten = energie_bezug_jahr * pyo.value(model.c_e)
+    
+    # Arbeitskosten mit zeitvariablen Preisen berechnen
+    arbeitskosten = 260 * sum(model.c_e[z] * pyo.value(model.p_grid[z]) * model.delta_t for z in model.Z)
     
     # Trafo-Erweiterung
     trafo = pyo.value(model.u) > 0.5
@@ -989,10 +1065,37 @@ if solution_found:
         total_speicher = 0
         print("\nKein Speicher installiert.")
         print(f"{'SUMME SPEICHER:':<60} {total_speicher:>13,.2f} €/Jahr")
+    # --- A6: PV-ANLAGE ---
+    print("\n" + "-" * 100)
+    print("A6: PV-ANLAGE")
+    print("-" * 100)
     
-    # --- A6: GESAMTKOSTENÜBERSICHT ---
+    pv_cap = pyo.value(model.p_pv_cap)
+    
+    if pv_cap > 0.01:
+        pv_kosten = pyo.value(model.capex_pv) * pv_cap
+        
+        # Tägliche PV-Erzeugung berechnen
+        pv_erzeugung_tag = sum(pyo.value(model.p_pv[z]) * model.delta_t for z in model.Z)
+        pv_erzeugung_jahr = 260 * pv_erzeugung_tag
+        
+        print(f"\n{'Komponente':<40} {'Wert':<20} {'Kosten':<15}")
+        print("=" * 80)
+        print(f"{'Installierte Leistung':<40} {pv_cap:>10,.1f} kWp")
+        print(f"{'CAPEX':<40} {pv_cap:>10,.1f} kWp × {pyo.value(model.capex_pv)} €/kWp {pv_kosten:>13,.2f} €")
+        print(f"{'Erzeugung pro Tag':<40} {pv_erzeugung_tag:>10,.1f} kWh")
+        print(f"{'Erzeugung pro Jahr':<40} {pv_erzeugung_jahr:>10,.1f} kWh")
+        print("-" * 80)
+        print(f"{'SUMME PV-KOSTEN:':<60} {pv_kosten:>13,.2f} €/Jahr")
+        
+        total_pv = pv_kosten
+    else:
+        print("\nKeine PV-Anlage installiert.")
+        print(f"{'SUMME PV-KOSTEN:':<60} {0:>13,.2f} €/Jahr")
+        total_pv = 0
+    # --- A7: GESAMTKOSTENÜBERSICHT ---
     print("\n" + "=" * 100)
-    print("A6: GESAMTKOSTENÜBERSICHT")
+    print("A7: GESAMTKOSTENÜBERSICHT")
     print("=" * 100)
     
     print(f"\n{'KOSTENPOSITION':<50} {'BETRAG':<20}")
@@ -1005,10 +1108,11 @@ if solution_found:
     print(f"{'Stromkosten (Grund+Arbeit+Leistung)':<50} {total_strom - trafo_kosten:>18,.2f} €")
     print(f"{'Trafo-Erweiterung':<50} {trafo_kosten:>18,.2f} €")
     print(f"{'Speicher':<50} {total_speicher:>18,.2f} €")
+    print(f"{'PV-Anlage':<50} {total_pv:>18,.2f} €")
     print("-" * 70)
     
     berechnete_summe = (total_diesel_fix + total_diesel_var + total_elektro_fix 
-                        - total_thg_erloes + total_lade_kosten + total_strom + total_speicher)
+                        - total_thg_erloes + total_lade_kosten + total_strom + total_speicher + total_pv)
     
     print(f"{'BERECHNETE GESAMTKOSTEN':<50} {berechnete_summe:>18,.2f} €")
     print(f"{'ZIELFUNKTIONSWERT (SOLVER)':<50} {pyo.value(model.obj):>18,.2f} €")
@@ -1332,7 +1436,9 @@ if solution_found:
         
         # Variable Kosten = anteiliger Strom (approximiert)
         energie_anteil = e_data['energie_jahr']
-        var = energie_anteil * pyo.value(model.c_e)  # Nur Arbeitspreis
+        # Durchschnittlicher Strompreis (HT/NT gemischt)
+        avg_strompreis = (HT_PREIS + NT_PREIS) / 2
+        var = energie_anteil * avg_strompreis  # Nur Arbeitspreis
         
         gesamt = fix + var
         pro_km = gesamt / km_jahr if km_jahr > 0 else 0
