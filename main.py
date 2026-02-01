@@ -314,13 +314,23 @@ model.con_soc_upper = pyo.Constraint(model.K, model.Z, rule=soc_upper_rule)
 def soc_cycle_rule(model, k):
     return model.soc[k, 1] == model.soc[k, 96]
 model.con_soc_cycle = pyo.Constraint(model.K, rule=soc_cycle_rule)
- 
+
+#Gesamtbegrenzung Ladesäulen: maximal 3 Säulen insgesamt
+def total_charger_limit_rule(model):
+    return sum(model.y_l[l] for l in model.L) <= model.Nmax
+model.con_total_charger_limit = pyo.Constraint(rule=total_charger_limit_rule) 
+# Neuer Code
 # --- 5.5 LADE-LOGIK ---
- 
+# 1. NEU: Nur laden wenn angesteckt
+def charging_requires_assign_rule(model, k, l, z):
+    return model.real_p[k, l, z] <= model.assign[k, l, z] * 10000
+model.con_charging_requires_assign = pyo.Constraint(model.K, model.L, model.Z, rule=charging_requires_assign_rule)
+
+
 def charging_power_limit_rule(model, k, l, z):
     return model.real_p[k, l, z] <= sum(model.type_assignment[k, t] * model.max_p_e[t] for t in model.T)
 model.con_charging_power_limit = pyo.Constraint(model.K, model.L, model.Z, rule=charging_power_limit_rule)
- 
+# ---
 def assign_requires_plug_rule(model, k, l, z):
     return model.assign[k, l, z] <= model.plug[k, l, z]
 model.con_assign_requires_plug = pyo.Constraint(model.K, model.L, model.Z, rule=assign_requires_plug_rule)
