@@ -4,9 +4,6 @@
 # MIT OPTIMIERUNG DER LKW-TYPEN - VOLLSTÄNDIG LINEARISIERT
 # ============================================================================
  
-# Installation und Import
-!pip install pyomo -q
-!apt-get install -y -qq glpk-utils
  
 import pyomo.environ as pyo
 from pyomo.opt import SolverFactory
@@ -536,11 +533,6 @@ model.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 # SOLVER INSTALLATION UND SETUP
 # ============================================================================
  
-# Solver installieren
-print("Installiere Solver...")
-!apt-get install -y -qq glpk-utils
-!apt-get install -y -qq coinor-cbc
-print("Solver-Installation abgeschlossen.\n")
  
 # ============================================================================
 # 7️⃣ SOLVER
@@ -558,14 +550,24 @@ solver_name = None
 solver = None
 solver_name = None
 
-# Versuche zuerst HiGHS (beste Ausgabe)
+# Versuche zuerst Gurobi (beste Löserqualität)
 try:
-    solver = SolverFactory('appsi_highs')
+    solver = SolverFactory('gurobi')
     if solver.available():
-        solver_name = 'HiGHS'
+        solver_name = 'Gurobi'
         print(f"Verwende Solver: {solver_name}")
 except:
     pass
+
+# Falls Gurobi nicht verfügbar, versuche HiGHS
+if solver is None or not solver.available():
+    try:
+        solver = SolverFactory('appsi_highs')
+        if solver.available():
+            solver_name = 'HiGHS'
+            print(f"Verwende Solver: {solver_name}")
+    except:
+        pass
 
 # Falls HiGHS nicht verfügbar, CBC
 if solver is None or not solver.available():
@@ -588,23 +590,22 @@ if solver is None or not solver.available():
         pass
  
 # Solver-Optionen
-    if solver_name == 'HiGHS':
-        solver.options['time_limit'] = 3600
-        solver.options['log_to_console'] = True
-    elif solver_name == 'CBC':
-        solver.options['seconds'] = 3600
-        solver.options['heuristics'] = 'on'
-        solver.options['round'] = 'on'
-        solver.options['feas'] = 'on'
-        solver.options['cuts'] = 'on'
-    elif solver_name == 'GLPK':
-        solver.options['tmlim'] = 3600
-    
-    print(f"\nStarte Optimierung (Zeitlimit: 1 Stunde)...\n")
-    results = solver.solve(model, tee=True)
- 
-# Modell lösen
-print(f"\nStarte Optimierung mit {solver_name} (Zeitlimit: 2 Stunden)...\n")
+if solver_name == 'Gurobi':
+    solver.options['TimeLimit'] = 3600  # 1 Stunde
+    solver.options['OutputFlag'] = 1
+elif solver_name == 'HiGHS':
+    solver.options['time_limit'] = 3600
+    solver.options['log_to_console'] = True
+elif solver_name == 'CBC':
+    solver.options['seconds'] = 3600
+    solver.options['heuristics'] = 'on'
+    solver.options['round'] = 'on'
+    solver.options['feas'] = 'on'
+    solver.options['cuts'] = 'on'
+elif solver_name == 'GLPK':
+    solver.options['tmlim'] = 3600
+
+print(f"\nStarte Optimierung mit {solver_name} (Zeitlimit: 1 Stunde)...\n")
 results = solver.solve(model, tee=True)
  
 # ============================================================================
