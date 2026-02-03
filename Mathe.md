@@ -1,7 +1,10 @@
 # MILP-Modelldokumentation — Aktualisierte Fassung
 
-> Basierend auf der Datei „MatheCodeGEkürzt.docx" und den Klärungen des Anwenders.
-> Änderungen gegenüber der Erstanalyse sind mit gekennzeichnet.
+> **MILP = Mixed Integer Linear Programming**
+> - **Mixed Integer**: Mischung aus ganzzahligen Variablen (z.B. "Wie viele Ladesäulen?") und kontinuierlichen Variablen (z.B. "Mit wie viel kW laden?")
+> - **Linear**: Alle Gleichungen und Ungleichungen sind linear (keine x², keine x·y)
+> - **Programming**: Mathematisches Optimierungsproblem
+
 
 ---
 
