@@ -213,7 +213,7 @@
 **(C32)** assign[k,l,z] ≤ plug[k,l,z] ∀k∈K, l∈L, z∈Z
 — Laden (assign=1) erfordert Anstecken (plug=1).
 
-**(C33)** Σ_{l∈L} y_l[l] ≤ Nmax **[NEU/AKTUALISIERT]**
+**(C33)** Σ_{l∈L} y_l[l] ≤ Nmax
 — Gesamtanzahl installierter Ladesäulen über alle Typen hinweg darf Nmax nicht überschreiten.
 
 ### 4.5 Stecker-/Abfahrt-Logik
@@ -235,7 +235,7 @@
 **(C23)** p_grid[z] ≤ p_peak ∀z∈Z
 — p_peak wird vom Solver als maximale Netzbezugsleistung über alle z bestimmt.
 
-**(C34)** P_truck[z] = Σ_{k∈K: type_k[k]∈TE} Σ_{l∈L} real_p[k,l,z] ∀z∈Z **[NEU/AKTUALISIERT]**
+**(C34)** P_truck[z] = Σ_{k∈K: type_k[k]∈TE} Σ_{l∈L} real_p[k,l,z] ∀z∈Z
 — Gesamte Ladeleistung aller E-LKWs im Zeitintervall z.
 
 ### 4.7 Stationärer Speicher
