@@ -67,7 +67,7 @@
 |----------------|-----------|
 | **cap_d[t]** (t∈TD) | Jährliche Leasingkosten für Diesel-LKW-Typ t. cap_d['ActrosL'] = 24.000. |
 | **opx_d[t]** (t∈TD) | Jährliche Wartungskosten. opx_d['ActrosL'] = 6.000. |
-| **avgDv_d[t]** (t∈TD) | Durchschnittlicher Dieselverbrauch in L/100km. avgDv_d['ActrosL'] = 0,26 (Einheit: L/100km bestätigt). |
+| **avgDv_d[t]** (t∈TD) | Durchschnittlicher Dieselverbrauch in L/100km. avgDv_d['ActrosL'] = 0,26 (Einheit: L/100km). |
 | **kfz_d[t]** (t∈TD) | KFZ-Steuer. kfz_d['ActrosL'] = 556. |
 | **c_diesel** | = 1,50 €/Liter — Dieselpreis. |
 
@@ -79,7 +79,7 @@
 | **opx_e[t]** (t∈TE) | Jährliche Wartungskosten. opx_e['eActros600'] = 6.000; opx_e['eActros400'] = 5.000. |
 | **avgEv_e[t]** (t∈TE) | Durchschnittlicher Energieverbrauch (kWh/km). avgEv_e['eActros600'] = 1,1; avgEv_e['eActros400'] = 1,05. |
 | **thg_e[t]** (t∈TE) | Treibhausgasquotenerlös pro E-LKW und Jahr. thg_e['eActros600'] = 1.000; thg_e['eActros400'] = 1.000. |
-| **max_p_e[t]** (t∈TE) | Maximale Ladeleistung des E-LKW-Typs in kW. max_p_e['eActros600'] = 400; max_p_e['eActros400'] = 400. Nur für Elektro-Typen definiert. |
+| **max_p_e[t]** (t∈TE) | Maximale Ladeleistung des E-LKW-Typs in kW. max_p_e['eActros600'] = 400; max_p_e['eActros400'] = 400. |
 | **soc_e[t]** (t∈TE) | Batteriekapazität in kWh. soc_e['eActros600'] = 621; soc_e['eActros400'] = 414. |
 
 ### 2.5 Ladesäulen-Parameter
@@ -109,8 +109,6 @@
 | **nrt** | = 0,98 — Round-Trip-Effizienz des Speichers. |
 | **dod** | = 0,025 — Depth of Discharge / Mindestreserve (2,5 %). |
 
- Parameter **M** = 10.000 wurde entfernt (laut Anwender nicht mehr benötigt).
-
 ---
 
 ## 3. Entscheidungsvariablen
@@ -123,7 +121,7 @@
 | **y_l[l]** (l∈L, ∈ ℤ≥0) | Anzahl installierter Ladesäulen des Typs l. Ganzzahlig, beschränkt durch Nmax (siehe C33). |
 | **assign[k,l,z]** (k∈K, l∈L, z∈Z, ∈ {0,1}) | = 1, wenn LKW k an Ladesäule l zum Zeitpunkt z aktiv lädt. |
 | **plug[k,l,z]** (k∈K, l∈L, z∈Z, ∈ {0,1}) | = 1, wenn LKW k einen Ladepunkt des Typs l im Intervall z belegt (angesteckt, auch ohne zu laden). |
-| **real_p[k,l,z]** (k∈K mit type_k[k]∈TE, l∈L, z∈Z, ≥ 0) | Reale Ladeleistung von E-LKW k an Ladesäule l zum Zeitpunkt z (kW). Nur für Elektro-LKWs definiert. |
+| **real_p[k,l,z]** (k∈K mit type_k[k]∈TE, l∈L, z∈Z, ≥ 0) | Reale Ladeleistung von E-LKW k an Ladesäule l zum Zeitpunkt z (kW).|
 | **P_truck[z]** (z∈Z, ≥ 0) | Gesamte Ladeleistung aller LKWs im Zeitintervall z (kW). Formalisiert als Hilfsvariable (siehe C34). |
 | **depart[k,z]** (k∈K, z∈Z, ∈ {0,1}) | Gibt an, ob LKW k zum Zeitpunkt z eine Tour startet. Wird per Constraint (C12) definiert. |
 | **cons[k,z]** (k∈K, z∈Z, ≥ 0) | Energieverbrauch von LKW k im Zeitintervall z (kWh). Wird per Constraint (C6/C7) definiert. |
@@ -262,8 +260,6 @@
 
 ## 5. Zielfunktion
 
- Cdiesel,var war in der Originaldatei nicht in der Gesamtkostensumme enthalten. Laut Anwender fehlt dieser Term.
-
 ### Gesamtkosten (Minimierung):
 
 **min C_total = C_trucks + C_chargers + C_grid_trafo + C_storage + C_electricity + C_diesel,var − C_revenue**
@@ -294,9 +290,7 @@
 
  C_diesel,var = 260 · Σ_{r∈R} Σ_{k∈K: type_k[k]∈TD} a[r,k] · (
  c_m_d · mDist[r] + c_diesel · (dist[r] / 100) · avgDv_d[type_k[k]]
- )
-
-Hinweis: Der Faktor 260 steht für Arbeitstage pro Jahr (nicht als benannter Parameter definiert, laut Anwender gewünscht). avgDv_d ist in L/100km angegeben, daher dist[r]/100.
+s)
 
 **C_electricity** — Stromkosten (Arbeitspreis + Grundgebühr + Leistungspreis, jährlich):
 
@@ -307,7 +301,3 @@ Hinweis: Der Faktor 260 steht für Arbeitstage pro Jahr (nicht als benannter Par
  C_revenue = Σ_{k∈K: type_k[k]∈TE} truck_used[k] × thg_e[type_k[k]]
 
 **Optimierungsziel:** Minimierung der jährlichen Gesamtkosten (Fixkosten + variable Kosten − Erlöse).
-
----
-
-*Dokument basiert ausschließlich auf den Inhalten der Datei „MatheCodeGEkürzt.docx" und den expliziten Klärungen des Anwenders. Alle offenen Fragen sind geklärt.*
