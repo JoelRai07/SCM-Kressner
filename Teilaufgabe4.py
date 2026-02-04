@@ -4,6 +4,7 @@
 # MIT OPTIMIERUNG DER LKW-TYPEN - VOLLSTÄNDIG LINEARISIERT
 # ============================================================================
  
+#!pip install pyomo -q
  
 import pyomo.environ as pyo
 from pyomo.opt import SolverFactory

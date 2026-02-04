@@ -1,10 +1,110 @@
-# MILP-Modelldokumentation — Aktualisierte Fassung
+# MILP-Modelldokumentation - Aktualisierte Fassung
 
 > **MILP = Mixed Integer Linear Programming**
 > - **Mixed Integer**: Mischung aus ganzzahligen Variablen (z.B. "Wie viele Ladesäulen?") und kontinuierlichen Variablen (z.B. "Mit wie viel kW laden?")
 > - **Linear**: Alle Gleichungen und Ungleichungen sind linear (keine x², keine x·y)
 > - **Programming**: Mathematisches Optimierungsproblem
 
+## Voraussetzungen
+
+- Python 3.10+
+- Miniconda (empfohlen) oder Python mit pip
+
+---
+
+## Installation
+
+### Option 1: Mit Colab
+- Im Code Zeile 7 auskommentieren: #!pip install pyomo -q
+- Inhalt von main.py in Colab kopieren und starten
+- (Teilaufgabe 4 ist analog dazu)
+
+
+### Option 2: Mit Miniconda (empfohlen)
+
+**1. Miniconda installieren:**
+- Download: https://docs.conda.io/en/latest/miniconda.html
+- Bei Installation:  "Add to PATH" ankreuzen
+
+**2. Terminal öffnen und Pakete installieren:**
+```bash
+conda install -c conda-forge pyomo highspy -y
+```
+
+### Option 3: Mit pip (falls kein Miniconda)
+
+```bash
+pip install pyomo
+```
+---
+
+## Solver-Konfiguration
+
+### Gurobi (schnellster Solver - empfohlen)
+
+**1. Akademische Lizenz holen (kostenlos mit Uni-Email):**
+- Registrieren: https://www.gurobi.com/academia/academic-program-and-licenses/
+- License Key per Email erhalten
+
+**2. Gurobi installieren:**
+```bash
+conda install -c gurobi gurobi -y
+```
+
+**3. Lizenz aktivieren:**
+```bash
+grbgetkey DEIN-LICENSE-KEY
+```
+(Enter drücken für Standard-Pfad)
+
+
+### HiGHS (Fallback - kostenlos, etwas langsamer)
+
+```bash
+conda install -c conda-forge highspy -y
+```
+
+
+## Skript starten
+
+### In VS Code:
+
+**1. Terminal öffnen:**
+
+**2. Conda aktivieren (falls nötig):**
+```bash
+conda activate base
+```
+
+**3. Skript starten:**
+```bash
+python main.py
+```
+oder
+```bash
+python "Teilaufgabe4.py"
+```
+
+
+
+
+## Solver-Vergleich
+
+| Solver | Geschwindigkeit | Lizenz | Installation |
+|--------|-----------------|--------|--------------|
+| **Gurobi** |  Sehr schnell | Akademisch kostenlos | conda + Lizenz |
+| **HiGHS** |  Mittel | Open Source | conda |
+
+**Empfehlung:** Gurobi mit akademischer Lizenz für beste Performance.
+
+---
+
+## Dateien
+
+| Datei | Beschreibung |
+|-------|--------------|
+| `main.py` | Teilaufgabe 2 - Basismodell |
+| `Teilaufgabe4.py` | Mit Erweiterungen (CO₂-Maut, HT/NT-Tarif, PV) |
 
 ---
 
